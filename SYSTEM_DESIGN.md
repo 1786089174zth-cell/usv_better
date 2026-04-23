@@ -436,3 +436,28 @@
 5. M2.5 替换真实执行客户端（后续）
 - 将 `SlamExecutorMockClient` 替换为真实 IPC 客户端。
 - 保持接口不变，最小化上层改动。
+
+## 18. Step3 网关行特征扩展（进行中）
+
+### 18.1 新增网关本地请求
+- `SR <seq> <tx_ms> frame_id=<n> width=<w> height=<h> payload_ref=<id> keyframe=<0|1> quality_hint=<0..100>`
+- 语义: 网关向 SLAM 适配器取 RGB 帧并提取行特征后，上报为 `SLI feature=row`。
+
+### 18.2 C START 扩展字段
+- `row_ratio=<0..1>`
+- `channel_mode=<R|G|B|GRAY>`
+- `sample_stride=<1..64>`
+- `max_rows=<1..8>`
+- `pack_mode=<bin|hex>`
+- 生效策略: 会话内冻结，`C STOP` 后才能通过新 `C START` 更新。
+
+### 18.3 RowFeatureReport（SLI 子类型）
+- 字段: `feature=row`, `frame_id`, `width`, `height`, `row_index`, `channel_mode`, `stride`, `sample_count`, `payload_len`, `payload_crc32`, `payload_ref`。
+- `row_index` 计算: `clamp(round((height-1)*row_ratio), 0, height-1)`。
+- 灰度近似: `Y=(77*R + 150*G + 29*B)>>8`。
+
+### 18.4 ACK 子码
+- 成功: `slam_row_ok`
+- 配置问题: `slam_row_cfg_err`
+- 丢弃/不可用: `slam_row_drop`
+- 执行超时: `slam_row_exec_timeout`

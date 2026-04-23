@@ -3,10 +3,13 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include "SlamExecutionLayer.h"
 
 namespace {
 
@@ -33,6 +36,18 @@ enum class DropPolicy {
     DropNewest,
 };
 
+enum class RowChannelMode {
+    R,
+    G,
+    B,
+    Gray,
+};
+
+enum class PackMode {
+    Binary,
+    DebugHex,
+};
+
 enum class SlamStatus : std::uint8_t {
     Normal = 0,
     Overloaded = 1,
@@ -55,6 +70,11 @@ struct SlamConfig {
     int max_groups = 8;
     int min_quality = 10;
     DropPolicy drop_policy = DropPolicy::DropNewest;
+    float row_ratio = 0.333333f;
+    RowChannelMode channel_mode = RowChannelMode::G;
+    int sample_stride = 1;
+    int max_rows = 1;
+    PackMode pack_mode = PackMode::Binary;
 };
 
 struct SlamImageFrame {
@@ -67,6 +87,13 @@ struct SlamImageFrame {
     bool keyframe = false;
     int quality_hint = 0;
     std::string payload_ref;
+    bool is_row_feature = false;
+    int row_index = -1;
+    std::string channel_mode;
+    int stride = 1;
+    int sample_count = 0;
+    int payload_len = 0;
+    std::uint32_t payload_crc32 = 0;
 };
 
 struct SlamOutput {
@@ -132,37 +159,115 @@ public:
     virtual bool GetHealth() = 0;
 };
 
-class SlamExecutorMockClient : public ISlamExecutorClient {
+class SlamExecutorBridgeClient : public ISlamExecutorClient {
 public:
-    bool PushConfig(std::uint32_t,
-                    std::uint32_t,
+    bool PushConfig(std::uint32_t session_id,
+                    std::uint32_t config_version,
                     const ControlConfig&,
-                    const SlamConfig&) override {
-        return true;
+                    const SlamConfig& slam_cfg) override {
+        return bridge_.PushConfig(session_id, config_version, toBridgeConfig(slam_cfg));
     }
 
-    ExecutorResult ProcessFrame(std::uint32_t,
+    ExecutorResult ProcessFrame(std::uint32_t session_id,
                                 const SlamImageFrame& frame,
                                 std::uint32_t timeout_ms) override {
-        ExecutorResult result;
-        result.proc_ms = static_cast<std::uint32_t>((frame.frame_id % 7U) + 10U);
-        result.timeout = result.proc_ms > timeout_ms;
-        result.ok = !result.timeout;
-        result.quality_score = std::clamp(frame.quality_hint, 0, 100);
-        if (result.ok && result.quality_score > 0) {
-            result.groups.push_back(0x010A1020u + (frame.frame_id & 0xFFu));
-            result.groups.push_back(0x020A1020u + ((frame.frame_id + 1U) & 0xFFu));
-        }
-        return result;
+        const slam_exec::ExecutorResult bridge_result =
+            bridge_.ProcessFrame(session_id, toBridgeFrame(frame), timeout_ms);
+        return fromBridgeResult(bridge_result);
     }
 
-    bool StopSession(std::uint32_t) override {
-        return true;
+    bool StopSession(std::uint32_t session_id) override {
+        return bridge_.StopSession(session_id);
     }
 
     bool GetHealth() override {
-        return true;
+        return bridge_.GetHealth();
     }
+
+private:
+    static slam_exec::DropPolicy toBridgeDropPolicy(DropPolicy policy) {
+        switch (policy) {
+            case DropPolicy::Reject:
+                return slam_exec::DropPolicy::Reject;
+            case DropPolicy::DropOldest:
+                return slam_exec::DropPolicy::DropOldest;
+            case DropPolicy::DropNewest:
+                return slam_exec::DropPolicy::DropNewest;
+        }
+        return slam_exec::DropPolicy::DropNewest;
+    }
+
+    static slam_exec::RowChannelMode toBridgeChannelMode(RowChannelMode mode) {
+        switch (mode) {
+            case RowChannelMode::R:
+                return slam_exec::RowChannelMode::R;
+            case RowChannelMode::G:
+                return slam_exec::RowChannelMode::G;
+            case RowChannelMode::B:
+                return slam_exec::RowChannelMode::B;
+            case RowChannelMode::Gray:
+                return slam_exec::RowChannelMode::Gray;
+        }
+        return slam_exec::RowChannelMode::G;
+    }
+
+    static slam_exec::PackMode toBridgePackMode(PackMode mode) {
+        switch (mode) {
+            case PackMode::Binary:
+                return slam_exec::PackMode::Binary;
+            case PackMode::DebugHex:
+                return slam_exec::PackMode::DebugHex;
+        }
+        return slam_exec::PackMode::Binary;
+    }
+
+    static slam_exec::SlamConfig toBridgeConfig(const SlamConfig& cfg) {
+        slam_exec::SlamConfig out;
+        out.max_fps = cfg.max_fps;
+        out.exec_timeout_ms = cfg.exec_timeout_ms;
+        out.max_groups = cfg.max_groups;
+        out.min_quality = cfg.min_quality;
+        out.drop_policy = toBridgeDropPolicy(cfg.drop_policy);
+        out.row_ratio = cfg.row_ratio;
+        out.channel_mode = toBridgeChannelMode(cfg.channel_mode);
+        out.sample_stride = cfg.sample_stride;
+        out.max_rows = cfg.max_rows;
+        out.pack_mode = toBridgePackMode(cfg.pack_mode);
+        return out;
+    }
+
+    static slam_exec::SlamImageFrame toBridgeFrame(const SlamImageFrame& frame) {
+        slam_exec::SlamImageFrame out;
+        out.seq = frame.seq;
+        out.tx_ms = frame.tx_ms;
+        out.frame_id = frame.frame_id;
+        out.width = frame.width;
+        out.height = frame.height;
+        out.pixel_fmt = frame.pixel_fmt;
+        out.keyframe = frame.keyframe;
+        out.quality_hint = frame.quality_hint;
+        out.payload_ref = frame.payload_ref;
+        out.is_row_feature = frame.is_row_feature;
+        out.row_index = frame.row_index;
+        out.channel_mode = frame.channel_mode;
+        out.stride = frame.stride;
+        out.sample_count = frame.sample_count;
+        out.payload_len = frame.payload_len;
+        out.payload_crc32 = frame.payload_crc32;
+        return out;
+    }
+
+    static ExecutorResult fromBridgeResult(const slam_exec::ExecutorResult& in) {
+        ExecutorResult out;
+        out.ok = in.ok;
+        out.timeout = in.timeout;
+        out.quality_score = in.quality_score;
+        out.proc_ms = in.proc_ms;
+        out.groups = in.groups;
+        return out;
+    }
+
+    slam_exec::SlamExecutionLayerClient bridge_;
 };
 
 class ControlDownlink {
@@ -307,6 +412,32 @@ std::optional<DropPolicy> parseDropPolicy(const std::string& token) {
     return std::nullopt;
 }
 
+std::optional<RowChannelMode> parseRowChannelMode(const std::string& token) {
+    if (token == "R") {
+        return RowChannelMode::R;
+    }
+    if (token == "G") {
+        return RowChannelMode::G;
+    }
+    if (token == "B") {
+        return RowChannelMode::B;
+    }
+    if (token == "GRAY") {
+        return RowChannelMode::Gray;
+    }
+    return std::nullopt;
+}
+
+std::optional<PackMode> parsePackMode(const std::string& token) {
+    if (token == "bin") {
+        return PackMode::Binary;
+    }
+    if (token == "hex") {
+        return PackMode::DebugHex;
+    }
+    return std::nullopt;
+}
+
 bool parseKVToken(const std::string& token, std::string* key, std::string* value) {
     if (key == nullptr || value == nullptr) {
         return false;
@@ -401,6 +532,43 @@ ParsedCommand parseCommand(const std::string& line) {
                 }
             } else if (key == "payload_ref") {
                 frame.payload_ref = value;
+            } else if (key == "feature") {
+                frame.is_row_feature = (value == "row");
+                if (!frame.is_row_feature) {
+                    cmd.parse_error = "sli_bad_feature";
+                    return cmd;
+                }
+            } else if (key == "row_index") {
+                if (!parseInt(value, &frame.row_index)) {
+                    cmd.parse_error = "sli_bad_row_index";
+                    return cmd;
+                }
+            } else if (key == "channel_mode") {
+                if (!parseRowChannelMode(value).has_value()) {
+                    cmd.parse_error = "sli_bad_channel_mode";
+                    return cmd;
+                }
+                frame.channel_mode = value;
+            } else if (key == "stride") {
+                if (!parseInt(value, &frame.stride)) {
+                    cmd.parse_error = "sli_bad_stride";
+                    return cmd;
+                }
+            } else if (key == "sample_count") {
+                if (!parseInt(value, &frame.sample_count)) {
+                    cmd.parse_error = "sli_bad_sample_count";
+                    return cmd;
+                }
+            } else if (key == "payload_len") {
+                if (!parseInt(value, &frame.payload_len)) {
+                    cmd.parse_error = "sli_bad_payload_len";
+                    return cmd;
+                }
+            } else if (key == "payload_crc32") {
+                if (!parseUInt32(value, &frame.payload_crc32)) {
+                    cmd.parse_error = "sli_bad_payload_crc32";
+                    return cmd;
+                }
             } else {
                 cmd.parse_error = "sli_unknown_key";
                 return cmd;
@@ -411,6 +579,13 @@ ParsedCommand parseCommand(const std::string& line) {
             frame.pixel_fmt.empty() || frame.payload_ref.empty()) {
             cmd.parse_error = "sli_incomplete";
             return cmd;
+        }
+        if (frame.is_row_feature) {
+            if (frame.row_index < 0 || frame.sample_count < 0 || frame.payload_len < 0 ||
+                frame.channel_mode.empty() || frame.stride <= 0) {
+                cmd.parse_error = "sli_row_incomplete";
+                return cmd;
+            }
         }
         cmd.frame = frame;
         cmd.type = CommandType::SlamImageInput;
@@ -528,6 +703,35 @@ ParsedCommand parseCommand(const std::string& line) {
                         return cmd;
                     }
                     cmd.slam_cfg.drop_policy = *policy;
+                } else if (key == "row_ratio") {
+                    if (!parseFloat(value, &cmd.slam_cfg.row_ratio)) {
+                        cmd.parse_error = "cfg_start_bad_row_ratio";
+                        return cmd;
+                    }
+                } else if (key == "channel_mode") {
+                    const auto channel = parseRowChannelMode(value);
+                    if (!channel.has_value()) {
+                        cmd.parse_error = "cfg_start_bad_channel_mode";
+                        return cmd;
+                    }
+                    cmd.slam_cfg.channel_mode = *channel;
+                } else if (key == "sample_stride") {
+                    if (!parseInt(value, &cmd.slam_cfg.sample_stride)) {
+                        cmd.parse_error = "cfg_start_bad_sample_stride";
+                        return cmd;
+                    }
+                } else if (key == "max_rows") {
+                    if (!parseInt(value, &cmd.slam_cfg.max_rows)) {
+                        cmd.parse_error = "cfg_start_bad_max_rows";
+                        return cmd;
+                    }
+                } else if (key == "pack_mode") {
+                    const auto mode = parsePackMode(value);
+                    if (!mode.has_value()) {
+                        cmd.parse_error = "cfg_start_bad_pack_mode";
+                        return cmd;
+                    }
+                    cmd.slam_cfg.pack_mode = *mode;
                 } else {
                     cmd.parse_error = "cfg_start_unknown_key";
                     return cmd;
@@ -582,6 +786,11 @@ private:
             cmd.slam_cfg.exec_timeout_ms <= 0 || cmd.slam_cfg.exec_timeout_ms > kSlamHardMaxTimeoutMs ||
             cmd.slam_cfg.max_groups <= 0 || cmd.slam_cfg.max_groups > kSlamHardMaxGroups) {
             return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "cfg_reject", "bad_slam_cfg");
+        }
+        if (cmd.slam_cfg.row_ratio < 0.0f || cmd.slam_cfg.row_ratio > 1.0f ||
+            cmd.slam_cfg.sample_stride <= 0 || cmd.slam_cfg.sample_stride > kSlamHardMaxStride ||
+            cmd.slam_cfg.max_rows <= 0 || cmd.slam_cfg.max_rows > kSlamHardMaxRows) {
+            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "cfg_reject", "bad_row_cfg");
         }
 
         session_.active = true;
@@ -648,17 +857,24 @@ private:
     }
 
     std::string onSlamImageInput(const ParsedCommand& cmd, std::uint64_t rx_ms) {
+        const bool is_row_feature = cmd.frame.is_row_feature;
         if (!session_.active) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "sli_reject", "no_session");
+            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
+                            is_row_feature ? "slam_row_drop" : "sli_reject",
+                            "no_session");
         }
         if (!isSupportedPixelFormat(cmd.frame.pixel_fmt)) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "sli_reject", "bad_pixel_fmt");
+            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
+                            is_row_feature ? "slam_row_cfg_err" : "sli_reject",
+                            "bad_pixel_fmt");
         }
 
         const std::string gate = checkSlamIngressBudget(rx_ms);
         if (!gate.empty()) {
             session_.slam_fusion.dropped_frames += 1;
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "sli_drop", gate);
+            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
+                            is_row_feature ? "slam_row_drop" : "sli_drop",
+                            gate);
         }
 
         SlamOutput output;
@@ -679,14 +895,16 @@ private:
             session_.slam_fusion.dropped_frames += 1;
             updateSlamFusionState(cmd, output);
             return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                            "sli_exec_timeout", "executor_timeout");
+                            is_row_feature ? "slam_row_exec_timeout" : "sli_exec_timeout",
+                            "executor_timeout");
         }
         if (!result.ok) {
             output.slam_status = SlamStatus::ExecutorError;
             session_.slam_fusion.dropped_frames += 1;
             updateSlamFusionState(cmd, output);
             return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                            "sli_exec_error", "executor_failed");
+                            is_row_feature ? "slam_row_drop" : "sli_exec_error",
+                            "executor_failed");
         }
 
         output.slam_status = SlamStatus::Normal;
@@ -706,7 +924,8 @@ private:
             session_.last_sli_rx_ms = rx_ms;
             session_.has_last_sli = true;
             return buildAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                            "sli_defer_rt", "status_only");
+                            is_row_feature ? "slam_row_drop" : "sli_defer_rt",
+                            "status_only");
         }
 
         const std::string slam_frame = downlink_.buildSlamFrame(cmd.seq, output);
@@ -714,7 +933,8 @@ private:
         session_.last_sli_rx_ms = rx_ms;
         session_.has_last_sli = true;
         return buildAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                        "sli_fusion_ok", slam_frame);
+                        is_row_feature ? "slam_row_ok" : "sli_fusion_ok",
+                        slam_frame);
     }
 
     void updateSlamFusionState(const ParsedCommand& cmd, const SlamOutput& output) {
@@ -725,7 +945,7 @@ private:
     }
 
     bool isSupportedPixelFormat(const std::string& pixel_fmt) const {
-        return pixel_fmt == "GRAY8" || pixel_fmt == "RGB24" || pixel_fmt == "NV12";
+        return pixel_fmt == "GRAY8" || pixel_fmt == "RGB24" || pixel_fmt == "NV12" || pixel_fmt == "ROW1";
     }
 
     std::string checkRealtimeRate(std::uint64_t rx_ms) const {
@@ -791,11 +1011,13 @@ private:
     static constexpr int kSlamHardMaxFps = 30;
     static constexpr int kSlamHardMaxTimeoutMs = 200;
     static constexpr int kSlamHardMaxGroups = 64;
+    static constexpr int kSlamHardMaxStride = 64;
+    static constexpr int kSlamHardMaxRows = 8;
     static constexpr std::uint64_t kRtPriorityWindowMs = 20;
 
     SessionState session_;
     ControlDownlink downlink_;
-    SlamExecutorMockClient slam_executor_;
+    SlamExecutorBridgeClient slam_executor_;
 };
 
 void printUsage() {
