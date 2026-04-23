@@ -30,6 +30,7 @@ R <seq> <F|B|L|R> [client_ts_ms]
 - Used for high-rate action control.
 - Requires active session started by `C START`.
 - Gateway normalizes this to processor format: `R <seq> <tx_ms> <action>`.
+- Legacy alias `RT` is accepted by the gateway and normalized to `R`.
 
 ### 2) SLAM image ingest frame
 ```text
@@ -37,6 +38,7 @@ SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12>
 ```
 - Sent to processing hub for executor call and fusion output.
 - `payload_ref` is an opaque frame reference (buffer ID / shared memory key / URI).
+- Legacy alias `SL` is accepted by the gateway and normalized to `SLI`.
 
 ### 3) SLAM row extraction request (gateway local)
 ```text
@@ -50,13 +52,15 @@ SR <seq> <tx_ms> frame_id=<n> width=<w> height=<h> payload_ref=<id> keyframe=<0|
 C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest> row_ratio=<0..1> channel_mode=<R|G|B|GRAY> sample_stride=<1..64> max_rows=<1..8> pack_mode=<bin|hex>
 C STOP seq=<n> ts=<ms>
 ```
+- Legacy aliases `CS` and `CE` are accepted by the gateway and normalized to `C START` and `C STOP`.
 
 ## ACK Format
 ```text
-ACK <OK|ERR> seq=<n> up_ms=<n> down_ms=<n> tag=<tag> detail=<text>
+ACK <OK|ERR> seq=<n> detail=<code> rx_ms=<n> ul_ms=<n> dl_ms=<n> trace=<id> route=<result>
 ```
 - `tag` examples: `cfg_start`, `rt_apply`, `sli_fusion_ok`, `sli_exec_timeout`.
 - Step3 row tags: `slam_row_ok`, `slam_row_drop`, `slam_row_cfg_err`, `slam_row_exec_timeout`.
+- `trace` is the gateway-side trace identifier used for cross-layer correlation.
 
 ## Quick Test
 ```bash

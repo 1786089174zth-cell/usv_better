@@ -40,7 +40,7 @@
 
 ### 3.1 usv_gateway
 - 管理 TCP 或 UDP 会话，支持断线重连。
-- 将上位机协议转换为内部消息。
+- 将上位机协议转换为内部消息，保留兼容别名映射层，但不扩展旧协议语义。
 - 维护上位机心跳超时计时器。
 - 将遥测、告警、图像元信息、SLAM 结果打包回传。
 - 限流与优先级调度: 控制状态高优先级，图像低优先级。
@@ -128,6 +128,11 @@
   - key, value
 - Ack
   - seq, result_code
+
+### 5.4 Gateway ACK 约定
+- ACK 格式统一为: `ACK <OK|ERR> seq=<n> detail=<code> rx_ms=<n> ul_ms=<n> dl_ms=<n> trace=<id> route=<result>`。
+- `trace_id` 由网关生成或继承，用于贯通解析失败、转发失败与下游返回。
+- 旧别名只在网关适配层保留: `RT -> R`, `SL -> SLI`, `CS -> C START`, `CE -> C STOP`。
 
 ### 5.4 遥测模型
 - TelemetryBasic
