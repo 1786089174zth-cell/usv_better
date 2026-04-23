@@ -2,7 +2,10 @@
 
 ## Overview
 This workspace contains a lightweight three-layer demo for USV edge validation.
-Current focus is communication and control command flow. SLAM processing is still placeholder.
+Current focus is Step2 processing-hub refactor:
+- Communication layer parses and forwards normalized frames.
+- Main processor owns control + SLAM ingest + fusion semantics.
+- SLAM executor is currently a mock client with stable interface.
 
 ## Files
 - `CommunicationLayer.cc`: short-frame communication parser/ack demo
@@ -24,37 +27,39 @@ R <seq> <F|B|L|R> [client_ts_ms]
 ```
 - Used for high-rate action control.
 - Requires active session started by `C START`.
+- Gateway normalizes this to processor format: `R <seq> <tx_ms> <action>`.
 
-### 2) SLAM short report frame
+### 2) SLAM image ingest frame
 ```text
-SL <seq> <tx_ms> <control_state> <slam_status> <count> <group8hex...>
+SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12> keyframe=<0|1> quality_hint=<0..100> payload_ref=<id>
 ```
-- `count` range: `0..256`
-- each `group8hex` is packed as:
-  - bits `31:24` color (0..255)
-  - bits `23:12` distance (0..0xFFF)
-  - bits `11:8` status
-  - bits `7:0` flags
+- Sent to processing hub for executor call and fusion output.
+- `payload_ref` is an opaque frame reference (buffer ID / shared memory key / URI).
 
 ### 3) Config long frame
 ```text
-C START hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> ts=<ms>
-C STOP [client_ts_ms]
+C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest>
+C STOP seq=<n> ts=<ms>
 ```
 
 ## ACK Format
 ```text
-ACK <OK|ERR> seq=<n> detail=<text> rx_ms=<n> ul_ms=<n> dl_ms=<n>
+ACK <OK|ERR> seq=<n> up_ms=<n> down_ms=<n> tag=<tag> detail=<text>
 ```
-- `ul_ms`: uplink estimate from client timestamp (or `-1.00` if missing)
-- `dl_ms`: local processing time in milliseconds
+- `tag` examples: `cfg_start`, `rt_apply`, `sli_fusion_ok`, `sli_exec_timeout`.
 
 ## Quick Test
 ```bash
-printf 'C START hz=20 max_power=60 left_gain=1 right_gain=1 left_trim=0 right_trim=0 ts=100\nR 1 F 101\nSL 12 102 3 0 2 010F0A0B 020F0102\nC STOP 103\nq\n' | ./communication_layer_demo
+printf 'C START seq=1 ts=100 soft_hz=20 max_power=60 left_gain=1 right_gain=1 left_trim=0 right_trim=0 slam_max_fps=8 slam_timeout_ms=60 slam_max_groups=4 slam_min_quality=15 slam_drop_policy=newest\nR 2 F 101\nSLI 3 102 frame_id=11 width=640 height=480 pixel_fmt=RGB24 keyframe=1 quality_hint=60 payload_ref=buf_11\nC STOP seq=4 ts=120\nq\n' | ./main_processor_demo
 ```
 
+## Processor-Executor Reserved Interface
+- `PushConfig(session_id, config_version, control_cfg, slam_cfg)`
+- `ProcessFrame(session_id, frame_meta, timeout_ms)`
+- `StopSession(session_id)`
+- `GetHealth()`
+
 ## Notes
-- Control and SLAM are split into separate frame types.
-- Config start/stop remains long-frame by design.
-- Current downlink is a stub (`std::cout`) for integration testing.
+- Communication layer no longer decides SLAM business semantics.
+- Processing layer controls rate-limit, drop policy, timeout, and fusion output.
+- Current executor is mock; interface is fixed for real implementation swap-in.

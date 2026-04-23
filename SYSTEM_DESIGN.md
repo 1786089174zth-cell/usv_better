@@ -313,3 +313,126 @@
 3. 接入真实推进器并完成安全保护。
 4. 接入相机和 SLAM 输出，先回传 pose 再回传图像。
 5. 完成弱网自适应、故障降级和联调验收。
+
+## 17. Step2 处理中枢改造蓝图（可直接开发）
+
+### 17.1 目标与边界
+- 目标: 将 SLAM 输入处理、融合语义、回传字段生成统一收敛到处理层（MainProcessor）。
+- 目标: 通信层仅负责解析、校验最小语法、规范化转发，不承载业务状态机。
+- 包含: SLI 输入链路、slam_config 生命周期、ACK tag/detail 细化、执行层接口预留。
+- 不包含: 真实 SLAM 算法实现、图像编码器实现、外部 GUI 工具链。
+
+### 17.2 接口契约
+
+#### 17.2.1 处理层对通信层入口
+- `std::string onCommData(const std::string& payload)`
+- 输入: 通信层规范化后的单行命令。
+- 输出: ACK 字符串，格式 `ACK <OK|ERR> seq=<n> up_ms=<n> down_ms=<n> tag=<tag> detail=<detail>`。
+
+#### 17.2.2 处理层对执行层接口（预留）
+- `class ISlamExecutorClient`
+- `bool PushConfig(uint32_t session_id, uint32_t config_version, const ControlConfig&, const SlamConfig&)`
+- `ExecutorResult ProcessFrame(uint32_t session_id, const SlamImageFrame&, uint32_t timeout_ms)`
+- `bool StopSession(uint32_t session_id)`
+- `bool GetHealth()`
+
+#### 17.2.3 执行层返回结构
+- `ExecutorResult.ok`: 是否执行成功。
+- `ExecutorResult.timeout`: 是否超时。
+- `ExecutorResult.quality_score`: 质量评分（0..100）。
+- `ExecutorResult.proc_ms`: 执行耗时。
+- `ExecutorResult.groups`: 障碍组/语义组打包结果。
+
+### 17.3 状态机
+
+#### 17.3.1 会话状态
+- `IDLE`: 无会话，拒收 `R`/`SLI`。
+- `ACTIVE`: 已完成 `C START`，可收 `R` 与 `SLI`。
+- `STOPPING`: 收到 `C STOP` 后调用执行层停会话，并下发零推力。
+
+#### 17.3.2 核心迁移
+- `IDLE -> ACTIVE`: `C START` 参数校验通过，且 `PushConfig` 成功。
+- `ACTIVE -> STOPPING`: 收到 `C STOP`。
+- `STOPPING -> IDLE`: `StopSession` + `sendZero` 结束。
+- `ACTIVE -> ACTIVE`: `R` 或 `SLI` 正常处理。
+
+#### 17.3.3 关键门控
+- `R` 路径限频: 硬上限 100Hz，软上限来自 `control_config.soft_limit_hz`。
+- `SLI` 路径限频: 上限来自 `slam_config.max_fps`。
+- 优先级: `R` 实时优先，若接近实时窗口（默认 20ms）则 `SLI` 可退化为仅状态上报。
+
+### 17.4 数据模型
+
+#### 17.4.1 控制配置
+- `ControlConfig`: `soft_limit_hz`, `max_power`, `left_gain`, `right_gain`, `left_trim`, `right_trim`。
+
+#### 17.4.2 SLAM 配置
+- `SlamConfig`: `max_fps`, `exec_timeout_ms`, `max_groups`, `min_quality`, `drop_policy`。
+- `drop_policy`: `reject | oldest | newest`。
+
+#### 17.4.3 输入帧
+- `SlamImageFrame`: `seq`, `tx_ms`, `frame_id`, `width`, `height`, `pixel_fmt`, `keyframe`, `quality_hint`, `payload_ref`。
+
+#### 17.4.4 融合输出
+- `SlamOutput`: `control_state`, `slam_status`, `groups`, `quality_score`, `proc_ms`, `source_ts`。
+
+#### 17.4.5 可观测融合状态
+- `SlamFusionState`: `last_input_ts_ms`, `last_proc_ms`, `dropped_frames`, `last_quality_score`, `output_seq`。
+
+### 17.5 报文与字段
+
+#### 17.5.1 `C START`（长帧）
+- 格式:
+  - `C START seq=<n> ts=<ms> soft_hz=<v> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<v> slam_timeout_ms=<v> slam_max_groups=<v> slam_min_quality=<v> slam_drop_policy=<reject|oldest|newest>`
+- 语义: 一次提交控制参数和 SLAM 参数，处理层做校验、补默认值、版本递增并冻结快照。
+
+#### 17.5.2 `R`（实时短帧）
+- 处理层规范化后格式:
+  - `R <seq> <tx_ms> <F|B|L|R>`
+- 语义: 控制优先路径，超限即拒绝。
+
+#### 17.5.3 `SLI`（SLAM 图像输入）
+- 格式:
+  - `SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12> keyframe=<0|1> quality_hint=<0..100> payload_ref=<id>`
+- 语义: 输入执行层占位接口 `ProcessFrame`，支持超时与降级。
+
+#### 17.5.4 `C STOP`
+- 格式:
+  - `C STOP seq=<n> ts=<ms>`
+- 语义: 停止会话、执行层停机、控制链路置零。
+
+#### 17.5.5 ACK 细化
+- 统一字段: `ACK <OK|ERR> seq=<n> up_ms=<n> down_ms=<n> tag=<tag> detail=<detail>`。
+- 建议 `tag`:
+  - `cfg_start`, `cfg_slam_downlink_fail`, `cfg_stop`
+  - `rt_apply`, `rt_reject`
+  - `sli_fusion_ok`, `sli_drop`, `sli_exec_timeout`, `sli_exec_error`, `sli_defer_rt`
+
+### 17.6 错误码与可追踪标签
+- 配置类: `bad_soft_hz`, `bad_slam_cfg`, `push_config_failed`。
+- 会话类: `no_session`, `session_closed`。
+- 输入类: `bad_pixel_fmt`, `sli_incomplete`, `sli_bad_kv`。
+- 预算类: `drop_reject_policy`, `drop_newest_overload`, `drop_oldest_overload`。
+- 执行类: `executor_timeout`, `executor_failed`。
+
+### 17.7 里程碑
+
+1. M2.1 数据模型与状态机落地（1-2 天）
+- 完成 `ControlConfig/SlamConfig/SlamFusionState` 与会话状态重构。
+- 通过 `C START/C STOP/R` 基本回归。
+
+2. M2.2 SLI 输入与执行层占位接口（1-2 天）
+- 打通 `SLI -> ProcessFrame -> SlamOutput -> ACK`。
+- 实现超时、低质量、group 截断策略。
+
+3. M2.3 通信层降责与转发闭环（1 天）
+- 通信层仅做解析、规范化、转发。
+- 业务语义全部由处理层输出。
+
+4. M2.4 稳定性与并发回归（1-2 天）
+- 覆盖无会话、非法输入、执行超时、过载丢帧。
+- 验证 `R` 高频下 `SLI` 不拖慢控制链路。
+
+5. M2.5 替换真实执行客户端（后续）
+- 将 `SlamExecutorMockClient` 替换为真实 IPC 客户端。
+- 保持接口不变，最小化上层改动。

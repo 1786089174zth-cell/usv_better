@@ -1,214 +1,57 @@
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <vector>
 
 namespace {
 
-enum class ActionType {
-    Forward,
-    Backward,
-    Left,
-    Right,
-    Invalid,
-};
-
-enum class SlamStatus : std::uint8_t {
-    Normal = 0,
-    OutOfRange = 1,
-    ChannelClosed = 2,
-    Error = 3,
-};
-
-struct OverrideConfig {
-    // Applied to control downlink after a successful C START.
-    float max_power = 70.0f;
-    float left_gain = 1.0f;
-    float right_gain = 1.0f;
-    float left_trim = 0.0f;
-    float right_trim = 0.0f;
-    int soft_hz = 50;
-};
-
 struct ParsedMessage {
     bool valid = false;
-    bool is_realtime = false;
-    bool is_config_start = false;
-    bool is_config_stop = false;
-    bool is_slam_report = false;
+    std::string normalized_payload;
 
     std::uint32_t seq = 0;
     std::uint64_t client_ts_ms = 0;
     bool has_client_ts = false;
 
-    ActionType action = ActionType::Invalid;
-    OverrideConfig config;
-
-    std::uint8_t control_state = 0;
-    SlamStatus slam_status = SlamStatus::Normal;
-    std::vector<std::uint32_t> slam_groups;
-
     std::string error;
 };
 
-class ControlDownlink {
+class ProcessorClient {
 public:
-    bool sendAction(ActionType action, const OverrideConfig& cfg) {
-        std::cout << "DOWNLINK action=" << actionToToken(action)
-                  << " soft_hz=" << cfg.soft_hz
-                  << " max_power=" << cfg.max_power
-                  << " left_gain=" << cfg.left_gain
-                  << " right_gain=" << cfg.right_gain
-                  << " left_trim=" << cfg.left_trim
-                  << " right_trim=" << cfg.right_trim << std::endl;
-        return true;
-    }
-
-    bool forceZero() {
-        std::cout << "DOWNLINK action=ZERO" << std::endl;
-        return true;
-    }
-
-    static std::uint32_t packSlamGroup(std::uint8_t color_8bit,
-                                       std::uint16_t distance_12bit,
-                                       std::uint8_t status_4bit,
-                                       std::uint8_t flags_8bit) {
-        // [31:24]=color, [23:12]=distance, [11:8]=status, [7:0]=flags
-        return (static_cast<std::uint32_t>(color_8bit) << 24) |
-               ((static_cast<std::uint32_t>(distance_12bit) & 0x0FFFu) << 12) |
-               ((static_cast<std::uint32_t>(status_4bit) & 0x0Fu) << 8) |
-               static_cast<std::uint32_t>(flags_8bit);
-    }
-
-    std::string buildSlamFrame(std::uint32_t seq,
-                               std::uint8_t control_state,
-                               SlamStatus slam_status,
-                               const std::vector<std::uint32_t>& groups) const {
+    std::string dispatch(const std::string& normalized_payload) {
+        // Placeholder for IPC dispatch to usv_control / main processor.
         std::ostringstream oss;
-        oss << "SL"
-            << ' ' << seq
-            << ' ' << static_cast<unsigned>(control_state)
-            << ' ' << static_cast<unsigned>(slam_status)
-            << ' ' << groups.size();
-
-        for (const std::uint32_t group : groups) {
-            oss << ' ' << toHex8(group);
-        }
-        return oss.str();
-    }
-
-private:
-    static std::string actionToToken(ActionType action) {
-        switch (action) {
-            case ActionType::Forward:
-                return "F";
-            case ActionType::Backward:
-                return "B";
-            case ActionType::Left:
-                return "L";
-            case ActionType::Right:
-                return "R";
-            default:
-                return "?";
-        }
-    }
-
-    static std::string toHex8(std::uint32_t value) {
-        std::ostringstream oss;
-        oss << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << value;
+        oss << "ACK OK routed detail=forwarded payload=\"" << normalized_payload << "\"";
         return oss.str();
     }
 };
 
 class CommunicationLayer {
 public:
-    explicit CommunicationLayer(ControlDownlink downlink)
-        : downlink_(std::move(downlink)) {}
+    explicit CommunicationLayer(ProcessorClient processor_client)
+        : processor_client_(std::move(processor_client)) {}
 
     std::string onReceive(const std::string& line) {
         const auto recv_tp = std::chrono::steady_clock::now();
         const std::uint64_t recv_ms = nowMs(recv_tp);
 
-        ParsedMessage msg = parseLine(line, active_cfg_);
+        const ParsedMessage msg = parseLine(line);
         if (!msg.valid) {
-            return buildAck("ERR", msg.seq, "bad_msg:" + msg.error, recv_ms, -1.0, recv_tp);
+            return buildAck("ERR", msg.seq, "gw_bad_msg:" + msg.error,
+                            recv_ms, -1.0, recv_tp, "parse_reject");
         }
 
-        if (msg.is_config_start) {
-            // Start session: config is latched and used for subsequent realtime actions.
-            active_cfg_ = msg.config;
-            active_cfg_.soft_hz = std::clamp(active_cfg_.soft_hz, 1, kHardMaxHz);
-            session_active_ = true;
-            has_last_rt_ = false;
-            return buildAck("OK", msg.seq, "cfg_start", recv_ms, computeUplinkMs(msg, recv_ms), recv_tp);
-        }
-
-        if (msg.is_config_stop) {
-            // Stop session and force a safe zero output.
-            session_active_ = false;
-            has_last_rt_ = false;
-            const bool ok = downlink_.forceZero();
-            return buildAck(ok ? "OK" : "ERR", msg.seq, ok ? "cfg_stop" : "downlink_fail",
-                            recv_ms, computeUplinkMs(msg, recv_ms), recv_tp);
-        }
-
-        if (msg.is_slam_report) {
-            // SL frames are uplink payload frames and bypass control rate checks.
-            const std::string frame = downlink_.buildSlamFrame(msg.seq, msg.control_state,
-                                                               msg.slam_status, msg.slam_groups);
-            return buildAck("OK", msg.seq, frame, recv_ms, computeUplinkMs(msg, recv_ms), recv_tp);
-        }
-
-        if (!session_active_) {
-            return buildAck("ERR", msg.seq, "no_session", recv_ms, computeUplinkMs(msg, recv_ms), recv_tp);
-        }
-
-        const auto now_tp = std::chrono::steady_clock::now();
-        if (has_last_rt_) {
-            const auto delta_us = std::chrono::duration_cast<std::chrono::microseconds>(now_tp - last_rt_tp_).count();
-            const double hz = (delta_us <= 0) ? 1000000.0 : (1000000.0 / static_cast<double>(delta_us));
-            // Soft limit is negotiated by C START; hard bound is enforced on config parsing.
-            if (hz > static_cast<double>(active_cfg_.soft_hz)) {
-                std::ostringstream detail;
-                detail << "rate_exceed:" << std::fixed << std::setprecision(1) << hz
-                       << ">" << active_cfg_.soft_hz;
-                return buildAck("ERR", msg.seq, detail.str(), recv_ms, computeUplinkMs(msg, recv_ms), recv_tp);
-            }
-        }
-
-        const bool ok = downlink_.sendAction(msg.action, active_cfg_);
-        last_rt_tp_ = now_tp;
-        has_last_rt_ = true;
-        return buildAck(ok ? "OK" : "ERR", msg.seq, ok ? "rt" : "downlink_fail",
-                        recv_ms, computeUplinkMs(msg, recv_ms), recv_tp);
+        const std::string processor_ack = processor_client_.dispatch(msg.normalized_payload);
+        return buildAck("OK", msg.seq, "gw_forwarded", recv_ms,
+                        computeUplinkMs(msg, recv_ms), recv_tp, processor_ack);
     }
 
 private:
-    static constexpr int kHardMaxHz = 100;
-
     static std::uint64_t nowMs(const std::chrono::steady_clock::time_point& tp) {
         return static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count());
-    }
-
-    static ActionType parseActionToken(const std::string& token) {
-        if (token == "F") {
-            return ActionType::Forward;
-        }
-        if (token == "B") {
-            return ActionType::Backward;
-        }
-        if (token == "L") {
-            return ActionType::Left;
-        }
-        if (token == "R") {
-            return ActionType::Right;
-        }
-        return ActionType::Invalid;
     }
 
     static bool parseUInt64(const std::string& s, std::uint64_t* out) {
@@ -239,20 +82,6 @@ private:
         return true;
     }
 
-    static bool parseFloat(const std::string& s, float* out) {
-        if (out == nullptr || s.empty()) {
-            return false;
-        }
-        std::istringstream iss(s);
-        float v = 0.0f;
-        iss >> v;
-        if (!iss || !iss.eof()) {
-            return false;
-        }
-        *out = v;
-        return true;
-    }
-
     static bool parseInt(const std::string& s, int* out) {
         if (out == nullptr || s.empty()) {
             return false;
@@ -267,23 +96,21 @@ private:
         return true;
     }
 
-    static bool parseHex32(const std::string& s, std::uint32_t* out) {
-        if (out == nullptr || s.empty()) {
+    static bool parseKVToken(const std::string& token, std::string* key, std::string* value) {
+        if (key == nullptr || value == nullptr) {
             return false;
         }
-        std::istringstream iss(s);
-        std::uint32_t v = 0;
-        iss >> std::hex >> v;
-        if (!iss || !iss.eof()) {
+        const std::size_t pos = token.find('=');
+        if (pos == std::string::npos || pos == 0 || pos + 1 >= token.size()) {
             return false;
         }
-        *out = v;
+        *key = token.substr(0, pos);
+        *value = token.substr(pos + 1);
         return true;
     }
 
-    static ParsedMessage parseLine(const std::string& line, const OverrideConfig& base_cfg) {
+    static ParsedMessage parseLine(const std::string& line) {
         ParsedMessage msg;
-        msg.config = base_cfg;
 
         std::istringstream iss(line);
         std::string mode;
@@ -304,9 +131,7 @@ private:
                 msg.error = "rt_bad_seq";
                 return msg;
             }
-
-            msg.action = parseActionToken(action_token);
-            if (msg.action == ActionType::Invalid) {
+            if (!(action_token == "F" || action_token == "B" || action_token == "L" || action_token == "R")) {
                 msg.error = "rt_bad_action";
                 return msg;
             }
@@ -320,19 +145,18 @@ private:
                 msg.has_client_ts = true;
             }
 
+            std::ostringstream normalized;
+            normalized << "R " << msg.seq << ' ' << (msg.has_client_ts ? msg.client_ts_ms : 0) << ' ' << action_token;
+            msg.normalized_payload = normalized.str();
             msg.valid = true;
-            msg.is_realtime = true;
             return msg;
         }
 
-        if (mode == "SL") {
-            // SLAM short frame: SL <seq> <tx_ms> <ctrl_state> <slam_status> <count> <groups...>
+        if (mode == "SLI") {
+            // SLAM image ingest frame: SLI <seq> <tx_ms> key=value...
             std::string seq_token;
             std::string tx_token;
-            int control_state = 0;
-            int slam_status = 0;
-            int count = 0;
-            if (!(iss >> seq_token >> tx_token >> control_state >> slam_status >> count)) {
+            if (!(iss >> seq_token >> tx_token)) {
                 msg.error = "sl_short_fields";
                 return msg;
             }
@@ -340,32 +164,44 @@ private:
                 msg.error = "sl_bad_header";
                 return msg;
             }
-            if (count < 0 || count > 256) {
-                msg.error = "sl_bad_count";
+
+            bool has_frame_id = false;
+            bool has_size = false;
+            std::ostringstream normalized;
+            normalized << "SLI " << msg.seq << ' ' << msg.client_ts_ms;
+            std::string kv;
+            while (iss >> kv) {
+                std::string key;
+                std::string value;
+                if (!parseKVToken(kv, &key, &value)) {
+                    msg.error = "sli_bad_kv";
+                    return msg;
+                }
+                if (key == "frame_id") {
+                    std::uint32_t frame_id = 0;
+                    if (!parseUInt32(value, &frame_id) || frame_id == 0) {
+                        msg.error = "sli_bad_frame_id";
+                        return msg;
+                    }
+                    has_frame_id = true;
+                }
+                if (key == "width" || key == "height") {
+                    int v = 0;
+                    if (!parseInt(value, &v) || v <= 0) {
+                        msg.error = "sli_bad_shape";
+                        return msg;
+                    }
+                    has_size = true;
+                }
+                normalized << ' ' << key << '=' << value;
+            }
+            if (!has_frame_id || !has_size) {
+                msg.error = "sli_incomplete";
                 return msg;
             }
-
-            msg.is_slam_report = true;
+            msg.normalized_payload = normalized.str();
+            msg.has_client_ts = true;
             msg.valid = true;
-            msg.control_state = static_cast<std::uint8_t>(std::clamp(control_state, 0, 255));
-            msg.slam_status = static_cast<SlamStatus>(std::clamp(slam_status, 0, 3));
-
-            for (int i = 0; i < count; ++i) {
-                std::string group_token;
-                if (!(iss >> group_token)) {
-                    msg.error = "sl_missing_group";
-                    msg.valid = false;
-                    return msg;
-                }
-                std::uint32_t group = 0;
-                if (!parseHex32(group_token, &group)) {
-                    msg.error = "sl_bad_group";
-                    msg.valid = false;
-                    return msg;
-                }
-                msg.slam_groups.push_back(group);
-            }
-
             return msg;
         }
 
@@ -378,77 +214,64 @@ private:
             }
 
             if (sub == "STOP") {
-                msg.valid = true;
-                msg.is_config_stop = true;
+                std::ostringstream normalized;
+                normalized << "C STOP";
 
-                std::string ts_token;
-                if (iss >> ts_token) {
-                    if (!parseUInt64(ts_token, &msg.client_ts_ms)) {
-                        msg.error = "cfg_stop_bad_ts";
-                        msg.valid = false;
+                std::string kv;
+                while (iss >> kv) {
+                    std::string key;
+                    std::string value;
+                    if (!parseKVToken(kv, &key, &value)) {
+                        msg.error = "cfg_stop_bad_kv";
                         return msg;
                     }
-                    msg.has_client_ts = true;
+                    if (key == "seq") {
+                        if (!parseUInt32(value, &msg.seq)) {
+                            msg.error = "cfg_stop_bad_seq";
+                            return msg;
+                        }
+                    } else if (key == "ts") {
+                        if (!parseUInt64(value, &msg.client_ts_ms)) {
+                            msg.error = "cfg_stop_bad_ts";
+                            return msg;
+                        }
+                        msg.has_client_ts = true;
+                    }
+                    normalized << ' ' << key << '=' << value;
                 }
+                msg.normalized_payload = normalized.str();
+                msg.valid = true;
                 return msg;
             }
 
             if (sub == "START") {
+                std::ostringstream normalized;
+                normalized << "C START";
                 std::string kv;
                 while (iss >> kv) {
-                    const auto pos = kv.find('=');
-                    if (pos == std::string::npos || pos == 0 || pos + 1 >= kv.size()) {
+                    std::string key;
+                    std::string value;
+                    if (!parseKVToken(kv, &key, &value)) {
                         msg.error = "cfg_bad_kv";
                         return msg;
                     }
-
-                    const std::string key = kv.substr(0, pos);
-                    const std::string value = kv.substr(pos + 1);
-
+                    if (key == "seq") {
+                        if (!parseUInt32(value, &msg.seq)) {
+                            msg.error = "cfg_bad_seq";
+                            return msg;
+                        }
+                    }
                     if (key == "ts") {
                         if (!parseUInt64(value, &msg.client_ts_ms)) {
                             msg.error = "cfg_bad_ts";
                             return msg;
                         }
                         msg.has_client_ts = true;
-                    } else if (key == "hz") {
-                        if (!parseInt(value, &msg.config.soft_hz)) {
-                            msg.error = "cfg_bad_hz";
-                            return msg;
-                        }
-                    } else if (key == "max_power") {
-                        if (!parseFloat(value, &msg.config.max_power)) {
-                            msg.error = "cfg_bad_max_power";
-                            return msg;
-                        }
-                    } else if (key == "left_gain") {
-                        if (!parseFloat(value, &msg.config.left_gain)) {
-                            msg.error = "cfg_bad_left_gain";
-                            return msg;
-                        }
-                    } else if (key == "right_gain") {
-                        if (!parseFloat(value, &msg.config.right_gain)) {
-                            msg.error = "cfg_bad_right_gain";
-                            return msg;
-                        }
-                    } else if (key == "left_trim") {
-                        if (!parseFloat(value, &msg.config.left_trim)) {
-                            msg.error = "cfg_bad_left_trim";
-                            return msg;
-                        }
-                    } else if (key == "right_trim") {
-                        if (!parseFloat(value, &msg.config.right_trim)) {
-                            msg.error = "cfg_bad_right_trim";
-                            return msg;
-                        }
-                    } else {
-                        msg.error = "cfg_unknown_key";
-                        return msg;
                     }
+                    normalized << ' ' << key << '=' << value;
                 }
-
+                msg.normalized_payload = normalized.str();
                 msg.valid = true;
-                msg.is_config_start = true;
                 return msg;
             }
 
@@ -472,7 +295,8 @@ private:
                                 const std::string& detail,
                                 std::uint64_t recv_ms,
                                 double uplink_ms,
-                                const std::chrono::steady_clock::time_point& recv_tp) {
+                                const std::chrono::steady_clock::time_point& recv_tp,
+                                const std::string& route_result) {
         const auto send_tp = std::chrono::steady_clock::now();
         const double downlink_ms =
             std::chrono::duration_cast<std::chrono::microseconds>(send_tp - recv_tp).count() / 1000.0;
@@ -483,27 +307,23 @@ private:
             << " detail=" << detail
             << " rx_ms=" << recv_ms
             << " ul_ms=" << std::fixed << std::setprecision(2) << uplink_ms
-            << " dl_ms=" << downlink_ms;
+            << " dl_ms=" << downlink_ms
+            << " route=" << route_result;
         return oss.str();
     }
 
-    OverrideConfig active_cfg_;
-    bool session_active_ = false;
-    bool has_last_rt_ = false;
-    std::chrono::steady_clock::time_point last_rt_tp_{};
-    ControlDownlink downlink_;
+    ProcessorClient processor_client_;
 };
 
 void printUsage() {
-    std::cout << "Communication Layer\n"
+    std::cout << "Communication Layer (Gateway Adapter)\n"
               << "Realtime short frame:\n"
               << "  R <seq> <F|B|L|R> [client_ts_ms]\n"
-              << "SLAM short report frame:\n"
-              << "  SL <seq> <tx_ms> <control_state> <slam_status> <count> <group8hex...>\n"
-              << "  group8hex = color8 + distance12 + status4 + flags8\n"
+              << "SLAM image ingest frame:\n"
+              << "  SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<fmt> keyframe=<0|1> quality_hint=<0..100> payload_ref=<id>\n"
               << "Config long frame:\n"
-              << "  C START hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> ts=<ms>\n"
-              << "  C STOP [client_ts_ms]\n"
+              << "  C START seq=<n> ts=<ms> soft_hz=<v> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<v> slam_timeout_ms=<v> slam_max_groups=<v> slam_min_quality=<v> slam_drop_policy=<reject|oldest|newest>\n"
+              << "  C STOP seq=<n> ts=<ms>\n"
               << "Quit:\n"
               << "  q\n";
 }
@@ -511,8 +331,8 @@ void printUsage() {
 }  // namespace
 
 int main() {
-    ControlDownlink downlink;
-    CommunicationLayer comm(std::move(downlink));
+    ProcessorClient processor_client;
+    CommunicationLayer comm(std::move(processor_client));
 
     printUsage();
     std::string line;
