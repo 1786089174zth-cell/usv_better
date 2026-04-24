@@ -1,5 +1,4 @@
-# USV Edge Demo (Short)
-
+# USV Edge Demo
 ## Overview
 This workspace contains a lightweight three-layer demo for USV edge validation.
 Current focus is Step3 gateway extension on top of Step2:
