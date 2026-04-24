@@ -319,15 +319,43 @@
 4. 接入相机和 SLAM 输出，先回传 pose 再回传图像。
 5. 完成弱网自适应、故障降级和联调验收。
 
-## 17. Step2 处理中枢改造蓝图（可直接开发）
+## 17. Phase 5 最终验收与迁移收口
 
-### 17.1 目标与边界
+### 17.1 上线准入门槛
+- 协议一致性: `C START/C STOP/R/SL/SLI` 的合法、非法、乱序、重复输入回归全部通过。
+- 稳定性门槛: 连续窗口内 `ack_p95_ms <= 80`，`ack_p99_ms <= 120`。
+- 可靠性门槛: `route_timeout_rate <= 5%`，`parse_fail_rate <= 10%`。
+- 可观测性门槛: 关键链路均可用 `trace_id` 关联定位。
+
+### 17.2 灰度迁移策略
+- 三阶段灰度: 实验环境 -> 单船灰度 -> 批量推广。
+- 兼容开关: 网关通过管理入口动态切换 `legacy_alias`、`sli_enabled` 和 `route_timeout_ms`。
+- 每一阶段至少保留一个稳定观察窗，未触发阻断项才可升段。
+
+### 17.3 回滚触发与动作
+- 触发条件:
+  - `rollback_recommended=1` 持续出现。
+  - `ack_p95_ms` 持续超阈。
+  - `route_timeout_rate` 或 `ack_err_rate` 异常升高。
+- 标准动作:
+  - 执行网关回滚命令，恢复保守配置。
+  - 恢复兼容别名路径并降低 SLI 流量。
+  - 固化故障证据包: trace、日志快照、指标快照、最近 ACK 样本。
+
+### 17.4 运维基线
+- 运行手册最小集: 启停顺序、健康检查、灰度切换、回滚流程。
+- 看板最小集: `rx_qps`、`parse_fail_rate`、`route_timeout_rate`、`slam_drop_rate`、`ack_p95_ms`、`ack_p99_ms`。
+- 告警最小集: 时延超阈、错误率超阈、队列积压、执行超时。
+
+## 18. Step2 处理中枢改造蓝图（可直接开发）
+
+### 18.1 目标与边界
 - 目标: 将 SLAM 输入处理、融合语义、回传字段生成统一收敛到处理层（MainProcessor）。
 - 目标: 通信层仅负责解析、校验最小语法、规范化转发，不承载业务状态机。
 - 包含: SLI 输入链路、slam_config 生命周期、ACK tag/detail 细化、执行层接口预留。
 - 不包含: 真实 SLAM 算法实现、图像编码器实现、外部 GUI 工具链。
 
-### 17.2 接口契约
+### 18.2 接口契约
 
 #### 17.2.1 处理层对通信层入口
 - `std::string onCommData(const std::string& payload)`
@@ -348,7 +376,7 @@
 - `ExecutorResult.proc_ms`: 执行耗时。
 - `ExecutorResult.groups`: 障碍组/语义组打包结果。
 
-### 17.3 状态机
+### 18.3 状态机
 
 #### 17.3.1 会话状态
 - `IDLE`: 无会话，拒收 `R`/`SLI`。
@@ -366,7 +394,7 @@
 - `SLI` 路径限频: 上限来自 `slam_config.max_fps`。
 - 优先级: `R` 实时优先，若接近实时窗口（默认 20ms）则 `SLI` 可退化为仅状态上报。
 
-### 17.4 数据模型
+### 18.4 数据模型
 
 #### 17.4.1 控制配置
 - `ControlConfig`: `soft_limit_hz`, `max_power`, `left_gain`, `right_gain`, `left_trim`, `right_trim`。
@@ -384,7 +412,7 @@
 #### 17.4.5 可观测融合状态
 - `SlamFusionState`: `last_input_ts_ms`, `last_proc_ms`, `dropped_frames`, `last_quality_score`, `output_seq`。
 
-### 17.5 报文与字段
+### 18.5 报文与字段
 
 #### 17.5.1 `C START`（长帧）
 - 格式:
@@ -413,14 +441,14 @@
   - `rt_apply`, `rt_reject`
   - `sli_fusion_ok`, `sli_drop`, `sli_exec_timeout`, `sli_exec_error`, `sli_defer_rt`
 
-### 17.6 错误码与可追踪标签
+### 18.6 错误码与可追踪标签
 - 配置类: `bad_soft_hz`, `bad_slam_cfg`, `push_config_failed`。
 - 会话类: `no_session`, `session_closed`。
 - 输入类: `bad_pixel_fmt`, `sli_incomplete`, `sli_bad_kv`。
 - 预算类: `drop_reject_policy`, `drop_newest_overload`, `drop_oldest_overload`。
 - 执行类: `executor_timeout`, `executor_failed`。
 
-### 17.7 里程碑
+### 18.7 里程碑
 
 1. M2.1 数据模型与状态机落地（1-2 天）
 - 完成 `ControlConfig/SlamConfig/SlamFusionState` 与会话状态重构。

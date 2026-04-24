@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -27,6 +28,7 @@ enum class CommandType {
     ConfigStart,
     ConfigStop,
     SlamImageInput,
+    Health,
     Invalid,
 };
 
@@ -135,6 +137,15 @@ struct SessionState {
     std::uint64_t last_sli_rx_ms = 0;
     bool has_last_sli = false;
     SlamFusionState slam_fusion;
+};
+
+struct RuntimeMetrics {
+    std::uint64_t ack_total = 0;
+    std::uint64_t ack_ok = 0;
+    std::uint64_t ack_err = 0;
+    std::uint64_t sli_drop = 0;
+    std::uint64_t executor_timeout = 0;
+    std::deque<std::uint64_t> ack_down_ms_samples;
 };
 
 struct ExecutorResult {
@@ -477,6 +488,11 @@ ParsedCommand parseCommand(const std::string& line) {
         return cmd;
     }
 
+    if (head == "HEALTH") {
+        cmd.type = CommandType::Health;
+        return cmd;
+    }
+
     if (head == "SLI") {
         std::string seq_token;
         std::string tx_token;
@@ -773,24 +789,27 @@ public:
         if (cmd.type == CommandType::SlamImageInput) {
             return onSlamImageInput(cmd, rx_ms);
         }
+        if (cmd.type == CommandType::Health) {
+            return onHealth();
+        }
 
-        return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "bad_command", "unsupported");
+        return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "bad_command", "unsupported");
     }
 
 private:
     std::string onConfigStart(const ParsedCommand& cmd, std::uint64_t rx_ms) {
         if (cmd.control_cfg.soft_limit_hz <= 0.0f || cmd.control_cfg.soft_limit_hz > kHardLimitHz) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "cfg_reject", "bad_soft_hz");
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "cfg_reject", "bad_soft_hz");
         }
         if (cmd.slam_cfg.max_fps <= 0 || cmd.slam_cfg.max_fps > kSlamHardMaxFps ||
             cmd.slam_cfg.exec_timeout_ms <= 0 || cmd.slam_cfg.exec_timeout_ms > kSlamHardMaxTimeoutMs ||
             cmd.slam_cfg.max_groups <= 0 || cmd.slam_cfg.max_groups > kSlamHardMaxGroups) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "cfg_reject", "bad_slam_cfg");
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "cfg_reject", "bad_slam_cfg");
         }
         if (cmd.slam_cfg.row_ratio < 0.0f || cmd.slam_cfg.row_ratio > 1.0f ||
             cmd.slam_cfg.sample_stride <= 0 || cmd.slam_cfg.sample_stride > kSlamHardMaxStride ||
             cmd.slam_cfg.max_rows <= 0 || cmd.slam_cfg.max_rows > kSlamHardMaxRows) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "cfg_reject", "bad_row_cfg");
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "cfg_reject", "bad_row_cfg");
         }
 
         session_.active = true;
@@ -810,12 +829,12 @@ private:
         const bool zero_ok = downlink_.sendAction(ActionType::Zero, session_.control_cfg);
         const std::uint64_t down_ms = nowMs() - t0;
         if (!push_ok) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                            "cfg_slam_downlink_fail", "push_config_failed");
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                           "cfg_slam_downlink_fail", "push_config_failed");
         }
-        return buildAck(zero_ok, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                        zero_ok ? "cfg_start" : "downlink_fail",
-                        "session_frozen");
+        return emitAck(zero_ok, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                       zero_ok ? "cfg_start" : "downlink_fail",
+                       "session_frozen");
     }
 
     std::string onConfigStop(const ParsedCommand& cmd, std::uint64_t rx_ms) {
@@ -829,21 +848,21 @@ private:
         session_.has_last_sli = false;
 
         if (!slam_ok) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms, "cfg_stop", "stop_session_failed");
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms, "cfg_stop", "stop_session_failed");
         }
-        return buildAck(zero_ok, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                        zero_ok ? "cfg_stop" : "downlink_fail",
-                        "session_closed");
+        return emitAck(zero_ok, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                       zero_ok ? "cfg_stop" : "downlink_fail",
+                       "session_closed");
     }
 
     std::string onRealtime(const ParsedCommand& cmd, std::uint64_t rx_ms) {
         if (!session_.active) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "rt_reject", "no_session");
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "rt_reject", "no_session");
         }
 
         const std::string rate_err = checkRealtimeRate(rx_ms);
         if (!rate_err.empty()) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "rt_reject", rate_err);
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "rt_reject", rate_err);
         }
 
         const std::uint64_t t0 = nowMs();
@@ -851,30 +870,33 @@ private:
         const std::uint64_t down_ms = nowMs() - t0;
         session_.last_rt_rx_ms = rx_ms;
         session_.has_last_rt = true;
-        return buildAck(ok, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                        ok ? "rt_apply" : "downlink_fail",
-                        ok ? "rt_ok" : "rt_downlink_error");
+        return emitAck(ok, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                   ok ? "rt_apply" : "downlink_fail",
+                   ok ? "rt_ok" : "rt_downlink_error");
     }
 
     std::string onSlamImageInput(const ParsedCommand& cmd, std::uint64_t rx_ms) {
         const bool is_row_feature = cmd.frame.is_row_feature;
         if (!session_.active) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
-                            is_row_feature ? "slam_row_drop" : "sli_reject",
-                            "no_session");
+            metrics_.sli_drop += 1;
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
+                           is_row_feature ? "slam_row_drop" : "sli_reject",
+                           "no_session");
         }
         if (!isSupportedPixelFormat(cmd.frame.pixel_fmt)) {
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
-                            is_row_feature ? "slam_row_cfg_err" : "sli_reject",
-                            "bad_pixel_fmt");
+            metrics_.sli_drop += 1;
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
+                           is_row_feature ? "slam_row_cfg_err" : "sli_reject",
+                           "bad_pixel_fmt");
         }
 
         const std::string gate = checkSlamIngressBudget(rx_ms);
         if (!gate.empty()) {
             session_.slam_fusion.dropped_frames += 1;
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
-                            is_row_feature ? "slam_row_drop" : "sli_drop",
-                            gate);
+            metrics_.sli_drop += 1;
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
+                           is_row_feature ? "slam_row_drop" : "sli_drop",
+                           gate);
         }
 
         SlamOutput output;
@@ -893,18 +915,21 @@ private:
         if (result.timeout) {
             output.slam_status = SlamStatus::ExecutorTimeout;
             session_.slam_fusion.dropped_frames += 1;
+            metrics_.sli_drop += 1;
+            metrics_.executor_timeout += 1;
             updateSlamFusionState(cmd, output);
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                            is_row_feature ? "slam_row_exec_timeout" : "sli_exec_timeout",
-                            "executor_timeout");
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                           is_row_feature ? "slam_row_exec_timeout" : "sli_exec_timeout",
+                           "executor_timeout");
         }
         if (!result.ok) {
             output.slam_status = SlamStatus::ExecutorError;
             session_.slam_fusion.dropped_frames += 1;
+            metrics_.sli_drop += 1;
             updateSlamFusionState(cmd, output);
-            return buildAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                            is_row_feature ? "slam_row_drop" : "sli_exec_error",
-                            "executor_failed");
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                           is_row_feature ? "slam_row_drop" : "sli_exec_error",
+                           "executor_failed");
         }
 
         output.slam_status = SlamStatus::Normal;
@@ -923,18 +948,38 @@ private:
             updateSlamFusionState(cmd, output);
             session_.last_sli_rx_ms = rx_ms;
             session_.has_last_sli = true;
-            return buildAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                            is_row_feature ? "slam_row_drop" : "sli_defer_rt",
-                            "status_only");
+            return emitAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                           is_row_feature ? "slam_row_drop" : "sli_defer_rt",
+                           "status_only");
         }
 
         const std::string slam_frame = downlink_.buildSlamFrame(cmd.seq, output);
         updateSlamFusionState(cmd, output);
         session_.last_sli_rx_ms = rx_ms;
         session_.has_last_sli = true;
-        return buildAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                        is_row_feature ? "slam_row_ok" : "sli_fusion_ok",
-                        slam_frame);
+        return emitAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                       is_row_feature ? "slam_row_ok" : "sli_fusion_ok",
+                       slam_frame);
+    }
+
+    std::string onHealth() const {
+        const std::uint64_t p95 = percentile(metrics_.ack_down_ms_samples, 95.0);
+        const std::uint64_t p99 = percentile(metrics_.ack_down_ms_samples, 99.0);
+        const bool rollback = shouldRollback();
+        std::ostringstream oss;
+        oss << "HEALTH"
+            << " session_active=" << (session_.active ? 1 : 0)
+            << " session_id=" << session_.session_id
+            << " cfg_ver=" << session_.config_version
+            << " ack_total=" << metrics_.ack_total
+            << " ack_ok=" << metrics_.ack_ok
+            << " ack_err=" << metrics_.ack_err
+            << " ack_p95_ms=" << p95
+            << " ack_p99_ms=" << p99
+            << " sli_drop=" << metrics_.sli_drop
+            << " executor_timeout=" << metrics_.executor_timeout
+            << " rollback_recommended=" << (rollback ? 1 : 0);
+        return oss.str();
     }
 
     void updateSlamFusionState(const ParsedCommand& cmd, const SlamOutput& output) {
@@ -989,6 +1034,27 @@ private:
         return "drop_oldest_overload";
     }
 
+    std::string emitAck(bool ok,
+                        std::uint32_t seq,
+                        std::uint64_t rx_ms,
+                        std::uint64_t tx_ms,
+                        std::uint64_t down_ms,
+                        const std::string& tag,
+                        const std::string& detail) {
+        metrics_.ack_total += 1;
+        if (ok) {
+            metrics_.ack_ok += 1;
+        } else {
+            metrics_.ack_err += 1;
+        }
+        metrics_.ack_down_ms_samples.push_back(down_ms);
+        if (metrics_.ack_down_ms_samples.size() > kAckSamplesWindow) {
+            metrics_.ack_down_ms_samples.pop_front();
+        }
+
+        return buildAck(ok, seq, rx_ms, tx_ms, down_ms, tag, detail);
+    }
+
     static std::string buildAck(bool ok,
                                 std::uint32_t seq,
                                 std::uint64_t rx_ms,
@@ -1007,6 +1073,25 @@ private:
         return oss.str();
     }
 
+    static std::uint64_t percentile(const std::deque<std::uint64_t>& samples, double p) {
+        if (samples.empty()) {
+            return 0;
+        }
+        std::vector<std::uint64_t> sorted(samples.begin(), samples.end());
+        std::sort(sorted.begin(), sorted.end());
+        const double rank = (p / 100.0) * static_cast<double>(sorted.size() - 1);
+        return sorted[static_cast<std::size_t>(rank)];
+    }
+
+    bool shouldRollback() const {
+        if (metrics_.ack_total < 20) {
+            return false;
+        }
+        const double err_rate = static_cast<double>(metrics_.ack_err) / static_cast<double>(metrics_.ack_total);
+        const std::uint64_t p95 = percentile(metrics_.ack_down_ms_samples, 95.0);
+        return err_rate > 0.10 || p95 > 80;
+    }
+
     static constexpr float kHardLimitHz = 100.0f;
     static constexpr int kSlamHardMaxFps = 30;
     static constexpr int kSlamHardMaxTimeoutMs = 200;
@@ -1014,8 +1099,10 @@ private:
     static constexpr int kSlamHardMaxStride = 64;
     static constexpr int kSlamHardMaxRows = 8;
     static constexpr std::uint64_t kRtPriorityWindowMs = 20;
+    static constexpr std::size_t kAckSamplesWindow = 256;
 
     SessionState session_;
+    RuntimeMetrics metrics_;
     ControlDownlink downlink_;
     SlamExecutorBridgeClient slam_executor_;
 };
@@ -1028,6 +1115,8 @@ void printUsage() {
               << "  R <seq> <tx_ms> <F|B|L|R>\n"
               << "SLAM image input:\n"
               << "  SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12> keyframe=<0|1> quality_hint=<0..100> payload_ref=<id>\n"
+              << "Health:\n"
+              << "  HEALTH\n"
               << "Config stop:\n"
               << "  C STOP seq=<n> ts=<ms>\n"
               << "Quit:\n"

@@ -62,6 +62,40 @@ ACK <OK|ERR> seq=<n> detail=<code> rx_ms=<n> ul_ms=<n> dl_ms=<n> trace=<id> rout
 - Step3 row tags: `slam_row_ok`, `slam_row_drop`, `slam_row_cfg_err`, `slam_row_exec_timeout`.
 - `trace` is the gateway-side trace identifier used for cross-layer correlation.
 
+## Runtime Management (Phase 5)
+
+Gateway management commands:
+```text
+GW HEALTH
+GW SWITCH legacy_alias=<on|off> sli_enabled=<on|off> route_timeout_ms=<1..5000>
+GW ROLLBACK
+```
+
+Processor health command:
+```text
+HEALTH
+```
+
+Notes:
+- `GW SWITCH` is the compatibility/traffic governance switch entry used by canary migration.
+- `GW ROLLBACK` applies conservative defaults immediately: `legacy_alias=on`, `sli_enabled=on`, `route_timeout_ms=80`.
+- `GW HEALTH` and `HEALTH` expose rollout SLO signals including `ack_p95_ms`, `ack_p99_ms`, timeout/drop counts, and rollback recommendation.
+
+## Phase 5 Release Gates
+
+Block release if any condition is true:
+- Protocol consistency checks fail for `C START/C STOP/R/SL/SLI`.
+- `rollback_recommended=1` in either gateway or processor health output for a sustained window.
+- `ack_p95_ms` exceeds 80 ms in canary traffic.
+- Route timeout or parse failure rate exceeds configured threshold.
+
+## Canary and Rollback Flow
+
+1. Stage A (lab): keep `legacy_alias=on`, verify full regression.
+2. Stage B (single vessel): disable alias gradually with `GW SWITCH legacy_alias=off`.
+3. Stage C (fleet): keep alias off, monitor health, and roll forward only when stable.
+4. Rollback trigger: when timeout/error SLO is violated, execute `GW ROLLBACK` and re-enable compatible path.
+
 ## Quick Test
 ```bash
 printf 'C START seq=1 ts=100 soft_hz=20 max_power=60 left_gain=1 right_gain=1 left_trim=0 right_trim=0 slam_max_fps=8 slam_timeout_ms=60 slam_max_groups=4 slam_min_quality=15 slam_drop_policy=newest\nR 2 F 101\nSLI 3 102 frame_id=11 width=640 height=480 pixel_fmt=RGB24 keyframe=1 quality_hint=60 payload_ref=buf_11\nC STOP seq=4 ts=120\nq\n' | ./main_processor_demo
@@ -69,6 +103,14 @@ printf 'C START seq=1 ts=100 soft_hz=20 max_power=60 left_gain=1 right_gain=1 le
 
 ```bash
 printf 'C START seq=1 ts=100 soft_hz=20 max_power=60 left_gain=1 right_gain=1 left_trim=0 right_trim=0 slam_max_fps=8 slam_timeout_ms=60 slam_max_groups=4 slam_min_quality=15 slam_drop_policy=newest row_ratio=0.333333 channel_mode=G sample_stride=2 max_rows=1 pack_mode=bin\nSR 2 101 frame_id=11 width=64 height=48 payload_ref=buf_11 keyframe=1 quality_hint=70\nC STOP seq=3 ts=120\nq\n' | ./communication_layer_demo
+```
+
+```bash
+printf 'GW HEALTH\nGW SWITCH legacy_alias=off route_timeout_ms=40\nGW HEALTH\nGW ROLLBACK\nGW HEALTH\nq\n' | ./communication_layer_demo
+```
+
+```bash
+printf 'HEALTH\nq\n' | ./main_processor_demo
 ```
 
 ## Processor-Executor Reserved Interface
