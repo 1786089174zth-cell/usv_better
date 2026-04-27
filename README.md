@@ -16,7 +16,7 @@ Current focus is Step3 gateway extension on top of Step2:
 ## Build
 ```bash
 g++ -std=c++17 -Wall -Wextra -pedantic CommunicationLayer.cc -o communication_layer_demo
-g++ -std=c++17 -Wall -Wextra -pedantic MainProcessor.cc SlamExecutionLayer.cc -o main_processor_demo
+g++ -std=c++17 -Wall -Wextra -pedantic MainProcessor.cc SlamExecutionLayer.cc -o main_processor_demo -lrealsense2
 g++ -std=c++17 -Wall -Wextra -pedantic TrusterAcuator.cc -o truster_actuator_demo
 ```
 

@@ -4,3 +4,6 @@
 /thruster_demo
 /thruster_process_layer_demo
 /truster_actuator_demo
+/SYSTEM_DESIGN.md
+wlan_watchdog.log
+wlan_watchdog.sh

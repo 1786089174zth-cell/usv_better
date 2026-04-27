@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include <librealsense2/rs.hpp>
+
 namespace slam_exec {
 
 enum class DropPolicy {
@@ -66,6 +68,22 @@ struct ExecutorResult {
     std::vector<std::uint32_t> groups;
 };
 
+struct D435iFrameSample {
+    bool valid = false;
+    std::uint64_t capture_ts_ms = 0;
+    std::uint32_t frame_id = 0;
+    std::uint32_t color_width = 0;
+    std::uint32_t color_height = 0;
+    std::uint32_t depth_width = 0;
+    std::uint32_t depth_height = 0;
+    int row_index = -1;
+    std::vector<std::uint8_t> rgb_row;
+    std::vector<std::uint16_t> depth_row;
+    float gyro_x = 0.0f;
+    float gyro_y = 0.0f;
+    float gyro_z = 0.0f;
+};
+
 class SlamExecutionLayerClient {
 public:
     SlamExecutionLayerClient();
@@ -87,6 +105,16 @@ public:
     bool StopSession(std::uint32_t session_id);
 
     bool GetHealth() const;
+
+    bool InitializeD435i(std::string* error = nullptr);
+    void ShutdownD435i();
+
+    bool CaptureD435iFrame(std::uint32_t timeout_ms,
+                           const SlamConfig& slam_cfg,
+                           D435iFrameSample* out,
+                           std::string* error = nullptr);
+
+    bool IsD435iReady() const;
 
 private:
     struct Impl;
