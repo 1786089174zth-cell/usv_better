@@ -29,15 +29,6 @@ std::uint32_t fnv1a32(const std::vector<std::uint8_t>& data) {
     return hash;
 }
 
-std::uint32_t fnv1a32String(const std::string& text) {
-    std::uint32_t hash = 2166136261u;
-    for (const unsigned char c : text) {
-        hash ^= static_cast<std::uint32_t>(c);
-        hash *= 16777619u;
-    }
-    return hash;
-}
-
 int clampRowIndex(float row_ratio, int height) {
     if (height <= 0) {
         return 0;
@@ -45,60 +36,6 @@ int clampRowIndex(float row_ratio, int height) {
     const float raw = static_cast<float>(height - 1) * row_ratio;
     const int row_index = static_cast<int>(std::lround(raw));
     return std::clamp(row_index, 0, height - 1);
-}
-
-std::uint8_t pseudoChannelValue(std::uint32_t seed, int x, int y, int channel) {
-    const std::uint32_t mixed = seed ^ (static_cast<std::uint32_t>(x) * 73856093u)
-                                ^ (static_cast<std::uint32_t>(y) * 19349663u)
-                                ^ (static_cast<std::uint32_t>(channel) * 83492791u);
-    return static_cast<std::uint8_t>((mixed ^ (mixed >> 8) ^ (mixed >> 16)) & 0xFFu);
-}
-
-std::uint8_t grayFromRgb(std::uint8_t r, std::uint8_t g, std::uint8_t b) {
-    // Integer approximation: Y = (77*R + 150*G + 29*B) >> 8
-    const int y = (77 * static_cast<int>(r)) + (150 * static_cast<int>(g)) + (29 * static_cast<int>(b));
-    return static_cast<std::uint8_t>(y >> 8);
-}
-
-std::vector<std::uint8_t> extractRowSamples(const SlamImageFrame& frame,
-                                            const SlamConfig& cfg,
-                                            int* out_row_index) {
-    std::vector<std::uint8_t> samples;
-    if (out_row_index == nullptr || frame.width <= 0 || frame.height <= 0) {
-        return samples;
-    }
-
-    const int stride = std::max(1, cfg.sample_stride);
-    const int row_index = clampRowIndex(cfg.row_ratio, frame.height);
-    *out_row_index = row_index;
-
-    samples.reserve(static_cast<std::size_t>((frame.width + stride - 1) / stride));
-    const std::uint32_t seed = fnv1a32String(frame.payload_ref) ^ frame.frame_id;
-
-    for (int x = 0; x < frame.width; x += stride) {
-        const std::uint8_t r = pseudoChannelValue(seed, x, row_index, 0);
-        const std::uint8_t g = pseudoChannelValue(seed, x, row_index, 1);
-        const std::uint8_t b = pseudoChannelValue(seed, x, row_index, 2);
-
-        std::uint8_t value = 0;
-        switch (cfg.channel_mode) {
-            case RowChannelMode::R:
-                value = r;
-                break;
-            case RowChannelMode::G:
-                value = g;
-                break;
-            case RowChannelMode::B:
-                value = b;
-                break;
-            case RowChannelMode::Gray:
-                value = grayFromRgb(r, g, b);
-                break;
-        }
-        samples.push_back(value);
-    }
-
-    return samples;
 }
 
 std::string channelModeToString(RowChannelMode mode) {
@@ -354,14 +291,10 @@ struct SlamExecutionLayerClient::Impl {
             feature_bytes.push_back(static_cast<std::uint8_t>((frame.frame_id >> 16) & 0xFFu));
             feature_bytes.push_back(static_cast<std::uint8_t>((frame.frame_id >> 24) & 0xFFu));
         } else {
-            const std::vector<std::uint8_t> row_samples = extractRowSamples(frame, slam_cfg, &row_index);
-            if (row_samples.empty()) {
-                result.ok = false;
-                result.timeout = false;
-                result.quality_score = 0;
-                return result;
-            }
-            feature_bytes = row_samples;
+            result.ok = false;
+            result.timeout = false;
+            result.quality_score = 0;
+            return result;
         }
 
         const std::uint32_t hash = fnv1a32(feature_bytes);

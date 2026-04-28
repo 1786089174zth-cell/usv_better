@@ -7,3 +7,5 @@
 /SYSTEM_DESIGN.md
 wlan_watchdog.log
 wlan_watchdog.sh
+sel_smoke_5s.log
+sel_smoke_revert.log

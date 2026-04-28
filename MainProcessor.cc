@@ -8,6 +8,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "SlamExecutionLayer.h"
@@ -168,6 +169,13 @@ public:
                                         std::uint32_t timeout_ms) = 0;
     virtual bool StopSession(std::uint32_t session_id) = 0;
     virtual bool GetHealth() = 0;
+    virtual bool InitializeD435i(std::string* error) = 0;
+    virtual void ShutdownD435i() = 0;
+    virtual bool CaptureD435iFrame(std::uint32_t timeout_ms,
+                                   const SlamConfig& slam_cfg,
+                                   slam_exec::D435iFrameSample* out,
+                                   std::string* error) = 0;
+    virtual bool IsD435iReady() const = 0;
 };
 
 class SlamExecutorBridgeClient : public ISlamExecutorClient {
@@ -193,6 +201,25 @@ public:
 
     bool GetHealth() override {
         return bridge_.GetHealth();
+    }
+
+    bool InitializeD435i(std::string* error) override {
+        return bridge_.InitializeD435i(error);
+    }
+
+    void ShutdownD435i() override {
+        bridge_.ShutdownD435i();
+    }
+
+    bool CaptureD435iFrame(std::uint32_t timeout_ms,
+                           const SlamConfig& slam_cfg,
+                           slam_exec::D435iFrameSample* out,
+                           std::string* error) override {
+        return bridge_.CaptureD435iFrame(timeout_ms, toBridgeConfig(slam_cfg), out, error);
+    }
+
+    bool IsD435iReady() const override {
+        return bridge_.IsD435iReady();
     }
 
 private:
@@ -1109,6 +1136,8 @@ private:
 
 void printUsage() {
     std::cout << "Main Processor Hub (Step2)\n"
+              << "Self-test:\n"
+              << "  --d435i-selftest\n"
               << "Config start:\n"
               << "  C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest>\n"
               << "Realtime:\n"
@@ -1123,9 +1152,82 @@ void printUsage() {
               << "  q\n";
 }
 
+int runD435iSelfTest() {
+    constexpr std::uint32_t kSessionId = 1u;
+    constexpr std::uint32_t kConfigVersion = 1u;
+    constexpr std::uint32_t kTimeoutMs = 80u;
+    constexpr int kWarmupFrames = 5;
+    constexpr std::uint32_t kTestDelayMs = 10000u;
+
+    ControlConfig control_cfg;
+    SlamConfig slam_cfg;
+    slam_cfg.max_fps = 10;
+    slam_cfg.exec_timeout_ms = static_cast<int>(kTimeoutMs);
+    slam_cfg.row_ratio = 0.333333f;
+    slam_cfg.sample_stride = 1;
+
+    SlamExecutorBridgeClient client;
+    std::string error;
+    if (!client.InitializeD435i(&error)) {
+        std::cerr << "D435i init failed: " << error << std::endl;
+        return 1;
+    }
+
+    if (!client.PushConfig(kSessionId, kConfigVersion, control_cfg, slam_cfg)) {
+        std::cerr << "PushConfig failed" << std::endl;
+        client.ShutdownD435i();
+        return 2;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(kTestDelayMs));
+
+    for (int i = 0; i < kWarmupFrames; ++i) {
+        slam_exec::D435iFrameSample warmup_sample;
+        std::string warmup_error;
+        client.CaptureD435iFrame(kTimeoutMs, slam_cfg, &warmup_sample, &warmup_error);
+    }
+
+    slam_exec::D435iFrameSample sample;
+    error.clear();
+    if (!client.CaptureD435iFrame(kTimeoutMs, slam_cfg, &sample, &error)) {
+        std::cerr << "CaptureD435iFrame failed: " << error << std::endl;
+        client.StopSession(kSessionId);
+        client.ShutdownD435i();
+        return 3;
+    }
+
+    SlamImageFrame frame;
+    frame.seq = 0;
+    frame.tx_ms = nowMs();
+    frame.frame_id = 1;
+    frame.width = static_cast<int>(sample.color_width);
+    frame.height = static_cast<int>(sample.color_height);
+    frame.pixel_fmt = "BGR8";
+    frame.keyframe = true;
+    frame.quality_hint = 60;
+    frame.payload_ref = "d435i_selftest";
+
+    const ExecutorResult result = client.ProcessFrame(kSessionId, frame, kTimeoutMs);
+    std::cout << "selftest capture rgb_bytes=" << sample.rgb_row.size()
+              << " depth_values=" << sample.depth_row.size()
+              << " result_ok=" << (result.ok ? "true" : "false")
+              << " timeout=" << (result.timeout ? "true" : "false")
+              << " quality=" << result.quality_score
+              << " groups=" << result.groups.size()
+              << " proc_ms=" << result.proc_ms
+              << std::endl;
+
+    client.StopSession(kSessionId);
+    client.ShutdownD435i();
+    return result.ok ? 0 : 4;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--d435i-selftest") {
+        return runD435iSelfTest();
+    }
     ControlDownlink downlink;
     MainProcessor processor(std::move(downlink));
 
