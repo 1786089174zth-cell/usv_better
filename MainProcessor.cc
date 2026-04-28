@@ -17,7 +17,6 @@ namespace {
 
 enum class ActionType {
     Forward,
-    Backward,
     TurnLeft,
     TurnRight,
     Zero,
@@ -345,8 +344,6 @@ private:
         switch (action) {
             case ActionType::Forward:
                 return "FORWARD";
-            case ActionType::Backward:
-                return "BACKWARD";
             case ActionType::TurnLeft:
                 return "LEFT";
             case ActionType::TurnRight:
@@ -424,9 +421,6 @@ bool parseFloat(const std::string& token, float* out) {
 std::optional<ActionType> parseActionToken(const std::string& token) {
     if (token == "F") {
         return ActionType::Forward;
-    }
-    if (token == "B") {
-        return ActionType::Backward;
     }
     if (token == "L") {
         return ActionType::TurnLeft;
@@ -1141,7 +1135,7 @@ void printUsage() {
               << "Config start:\n"
               << "  C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest>\n"
               << "Realtime:\n"
-              << "  R <seq> <tx_ms> <F|B|L|R>\n"
+              << "  R <seq> <tx_ms> <F|L|R>\n"
               << "SLAM image input:\n"
               << "  SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12> keyframe=<0|1> quality_hint=<0..100> payload_ref=<id>\n"
               << "Health:\n"

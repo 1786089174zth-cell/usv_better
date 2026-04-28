@@ -176,7 +176,7 @@ private:
         }
 
         if (mode == "R") {
-            // Realtime short frame: R <seq> <F|B|L|R> [client_ts_ms]
+            // Realtime short frame: R <seq> <F|L|R> [client_ts_ms]
             std::string seq_token;
             std::string action_token;
             if (!(iss >> seq_token >> action_token)) {
@@ -187,7 +187,7 @@ private:
                 msg.error = "rt_bad_seq";
                 return msg;
             }
-            if (!(action_token == "F" || action_token == "B" || action_token == "L" || action_token == "R")) {
+            if (!(action_token == "F" || action_token == "L" || action_token == "R")) {
                 msg.error = "rt_bad_action";
                 return msg;
             }
@@ -223,7 +223,7 @@ private:
                 msg.error = "rt_bad_seq";
                 return msg;
             }
-            if (!(action_token == "F" || action_token == "B" || action_token == "L" || action_token == "R")) {
+            if (!(action_token == "F" || action_token == "L" || action_token == "R")) {
                 msg.error = "rt_bad_action";
                 return msg;
             }
@@ -710,8 +710,8 @@ private:
 void printUsage() {
     std::cout << "Communication Layer (Gateway Adapter)\n"
               << "Realtime short frame:\n"
-              << "  R <seq> <F|B|L|R> [client_ts_ms]\n"
-              << "  RT <seq> <F|B|L|R> [client_ts_ms]  # legacy alias\n"
+              << "  R <seq> <F|L|R> [client_ts_ms]\n"
+              << "  RT <seq> <F|L|R> [client_ts_ms]  # legacy alias\n"
               << "SLAM image ingest frame:\n"
               << "  SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<fmt> keyframe=<0|1> quality_hint=<0..100> payload_ref=<id>\n"
               << "  SL <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<fmt> keyframe=<0|1> quality_hint=<0..100> payload_ref=<id>  # legacy alias\n"

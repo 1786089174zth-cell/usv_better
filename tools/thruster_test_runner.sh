@@ -16,10 +16,10 @@ fi
 percent_to_duty_ns() {
   local percent="$1"
   awk -v p="$percent" -v n="$NEUTRAL_NS" -v s="$SPAN_NS" 'BEGIN {
-    if (p < -100) p = -100;
+    if (p < 0) p = 0;
     if (p > 100) p = 100;
     duty = n + (p / 100.0) * s;
-    min = n - s;
+    min = n;
     max = n + s;
     if (duty < min) duty = min;
     if (duty > max) duty = max;
@@ -91,7 +91,7 @@ fi
 
 echo "Running in $([[ $HW_MODE -eq 1 ]] && echo HW || echo dry-run) mode"
 echo "Input format: <left_percent> <right_percent>"
-echo "Percent range: -100 to 100, mapped around neutral duty ${NEUTRAL_NS}ns with span ${SPAN_NS}ns"
+echo "Percent range: 0 to 100 only, mapped from neutral duty ${NEUTRAL_NS}ns up to ${NEUTRAL_NS}ns + ${SPAN_NS}ns"
 echo "Type q to quit."
 echo "Hardware pin mapping: pwm1 -> pin8 (PH3), pwm2 -> pin10 (PH2)"
 
@@ -110,7 +110,19 @@ while true; do
 
   read -r left_percent right_percent <<< "$line" || true
   if [[ -z "${left_percent:-}" || -z "${right_percent:-}" ]]; then
-    echo "WARN: expected two numbers, for example: 30 -25"
+    echo "WARN: expected two numbers, for example: 30 25"
+    continue
+  fi
+
+  if ! [[ "$left_percent" =~ ^-?[0-9]+([.][0-9]+)?$ && "$right_percent" =~ ^-?[0-9]+([.][0-9]+)?$ ]]; then
+    echo "WARN: expected numeric percentages"
+    continue
+  fi
+
+  if awk -v l="$left_percent" -v r="$right_percent" 'BEGIN { exit !((l >= 0 && l <= 100) && (r >= 0 && r <= 100)) }'; then
+    :
+  else
+    echo "WARN: negative values are not allowed; use 0..100 only"
     continue
   fi
 
