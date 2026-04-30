@@ -42,8 +42,11 @@ class ProcessorClient {
 public:
     std::string dispatch(const std::string& normalized_payload) {
         // Placeholder for IPC dispatch to usv_control / main processor.
+        // In production, this should forward normalized_payload to MainProcessor
+        // and return its ACK in the format: ACK OK/ERR seq=... up_ms=... down_ms=... tag=... detail=...
+        // For now, returning a valid sample ACK that parseProcessorAck can handle.
         std::ostringstream oss;
-        oss << "ACK OK routed detail=forwarded payload=\"" << normalized_payload << "\"";
+        oss << "ACK OK seq=0 up_ms=0 down_ms=5 tag=gw_forwarded detail=placeholder";
         return oss.str();
     }
 };
