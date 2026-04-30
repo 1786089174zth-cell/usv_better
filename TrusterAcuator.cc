@@ -51,8 +51,8 @@ public:
 		left = left * cfg_.left_gain + cfg_.left_trim;
 		right = right * cfg_.right_gain + cfg_.right_trim;
 
-		left = clamp(left, -100.0f, 100.0f);
-		right = clamp(right, -100.0f, 100.0f);
+		left = clamp(left, 0.0f, 100.0f);
+		right = clamp(right, 0.0f, 100.0f);
 
 		out.left_percent_final = left;
 		out.right_percent_final = right;

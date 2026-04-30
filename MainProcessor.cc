@@ -833,7 +833,7 @@ private:
             return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0, "cfg_reject", "bad_row_cfg");
         }
 
-        session_.active = true;
+        // Only mark session active AFTER both executor config and downlink succeed
         session_.session_id += 1;
         session_.config_version += 1;
         session_.control_cfg = cmd.control_cfg;
@@ -849,13 +849,22 @@ private:
                                                        session_.slam_cfg);
         const bool zero_ok = downlink_.sendAction(ActionType::Zero, session_.control_cfg);
         const std::uint64_t down_ms = nowMs() - t0;
+
         if (!push_ok) {
+            // Config push failed, session remains inactive, state is recoverable
             return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
                            "cfg_slam_downlink_fail", "push_config_failed");
         }
-        return emitAck(zero_ok, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                       zero_ok ? "cfg_start" : "downlink_fail",
-                       "session_frozen");
+        if (!zero_ok) {
+            // Downlink failed, session remains inactive, state is recoverable
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                           "cfg_downlink_fail", "zero_cmd_failed");
+        }
+
+        // Both succeeded, now mark session active
+        session_.active = true;
+        return emitAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                       "cfg_start", "session_active");
     }
 
     std::string onConfigStop(const ParsedCommand& cmd, std::uint64_t rx_ms) {
@@ -864,16 +873,22 @@ private:
         const bool zero_ok = downlink_.sendZero();
         const std::uint64_t down_ms = nowMs() - t0;
 
+        if (!slam_ok) {
+            // Executor stop failed, keep session active so STOP can be retried
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms, "cfg_stop", "executor_stop_failed");
+        }
+        if (!zero_ok) {
+            // Downlink failed, keep session active so STOP can be retried
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms, "cfg_stop", "zero_cmd_failed");
+        }
+
+        // Both succeeded, now mark session inactive
         session_.active = false;
         session_.has_last_rt = false;
         session_.has_last_sli = false;
 
-        if (!slam_ok) {
-            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms, "cfg_stop", "stop_session_failed");
-        }
-        return emitAck(zero_ok, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                       zero_ok ? "cfg_stop" : "downlink_fail",
-                       "session_closed");
+        return emitAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                       "cfg_stop", "session_closed");
     }
 
     std::string onRealtime(const ParsedCommand& cmd, std::uint64_t rx_ms) {
@@ -891,24 +906,29 @@ private:
         const std::uint64_t down_ms = nowMs() - t0;
         session_.last_rt_rx_ms = rx_ms;
         session_.has_last_rt = true;
-        return emitAck(ok, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                   ok ? "rt_apply" : "downlink_fail",
-                   ok ? "rt_ok" : "rt_downlink_error");
+
+        if (ok) {
+            return emitAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                       "rt_apply", "action_sent");
+        } else {
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                       "rt_fail", "downlink_error");
+        }
     }
 
     std::string onSlamImageInput(const ParsedCommand& cmd, std::uint64_t rx_ms) {
         const bool is_row_feature = cmd.frame.is_row_feature;
+        const std::string fail_tag = is_row_feature ? "slam_row_fail" : "sli_fail";
+
         if (!session_.active) {
             metrics_.sli_drop += 1;
             return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
-                           is_row_feature ? "slam_row_drop" : "sli_reject",
-                           "no_session");
+                           fail_tag, "no_session");
         }
         if (!isSupportedPixelFormat(cmd.frame.pixel_fmt)) {
             metrics_.sli_drop += 1;
             return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
-                           is_row_feature ? "slam_row_cfg_err" : "sli_reject",
-                           "bad_pixel_fmt");
+                           fail_tag, "bad_pixel_fmt");
         }
 
         const std::string gate = checkSlamIngressBudget(rx_ms);
@@ -916,8 +936,7 @@ private:
             session_.slam_fusion.dropped_frames += 1;
             metrics_.sli_drop += 1;
             return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
-                           is_row_feature ? "slam_row_drop" : "sli_drop",
-                           gate);
+                           fail_tag, gate);
         }
 
         SlamOutput output;
@@ -940,8 +959,7 @@ private:
             metrics_.executor_timeout += 1;
             updateSlamFusionState(cmd, output);
             return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                           is_row_feature ? "slam_row_exec_timeout" : "sli_exec_timeout",
-                           "executor_timeout");
+                           fail_tag, "executor_timeout");
         }
         if (!result.ok) {
             output.slam_status = SlamStatus::ExecutorError;
@@ -949,8 +967,7 @@ private:
             metrics_.sli_drop += 1;
             updateSlamFusionState(cmd, output);
             return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                           is_row_feature ? "slam_row_drop" : "sli_exec_error",
-                           "executor_failed");
+                           fail_tag, "executor_error");
         }
 
         output.slam_status = SlamStatus::Normal;
@@ -969,21 +986,22 @@ private:
             updateSlamFusionState(cmd, output);
             session_.last_sli_rx_ms = rx_ms;
             session_.has_last_sli = true;
-            return emitAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                           is_row_feature ? "slam_row_drop" : "sli_defer_rt",
-                           "status_only");
+            // Overload degradation: frame deferred due to RT priority
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                           fail_tag, "overload_rt_priority");
         }
 
         const std::string slam_frame = downlink_.buildSlamFrame(cmd.seq, output);
         updateSlamFusionState(cmd, output);
         session_.last_sli_rx_ms = rx_ms;
         session_.has_last_sli = true;
+        const std::string ok_tag = is_row_feature ? "slam_row_ok" : "sli_ok";
         return emitAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                       is_row_feature ? "slam_row_ok" : "sli_fusion_ok",
-                       slam_frame);
+                       ok_tag, slam_frame);
     }
 
     std::string onHealth() const {
+        const std::uint64_t p50 = percentile(metrics_.ack_down_ms_samples, 50.0);
         const std::uint64_t p95 = percentile(metrics_.ack_down_ms_samples, 95.0);
         const std::uint64_t p99 = percentile(metrics_.ack_down_ms_samples, 99.0);
         const bool rollback = shouldRollback();
@@ -991,13 +1009,14 @@ private:
         oss << "HEALTH"
             << " session_active=" << (session_.active ? 1 : 0)
             << " session_id=" << session_.session_id
-            << " cfg_ver=" << session_.config_version
+            << " config_version=" << session_.config_version
             << " ack_total=" << metrics_.ack_total
             << " ack_ok=" << metrics_.ack_ok
             << " ack_err=" << metrics_.ack_err
+            << " ack_p50_ms=" << p50
             << " ack_p95_ms=" << p95
             << " ack_p99_ms=" << p99
-            << " sli_drop=" << metrics_.sli_drop
+            << " sli_dropped=" << metrics_.sli_drop
             << " executor_timeout=" << metrics_.executor_timeout
             << " rollback_recommended=" << (rollback ? 1 : 0);
         return oss.str();
@@ -1019,15 +1038,18 @@ private:
             return "";
         }
         if (rx_ms <= session_.last_rt_rx_ms) {
-            return "rate_over_hard";
+            // Hard rejection: time sequence violated
+            return "reject_rate_non_monotonic";
         }
         const float delta_ms = static_cast<float>(rx_ms - session_.last_rt_rx_ms);
         const float hz = 1000.0f / delta_ms;
         if (hz > kHardLimitHz + 1e-3f) {
-            return "rate_over_hard";
+            // Hard rejection: exceeds hard limit (100Hz max)
+            return "reject_rate_hard";
         }
         if (hz > session_.control_cfg.soft_limit_hz + 1e-3f) {
-            return "rate_over_soft";
+            // Soft limit exceeded: user configured limit, still reject but for configuration reason
+            return "reject_rate_soft";
         }
         return "";
     }
@@ -1037,7 +1059,8 @@ private:
             return "";
         }
         if (rx_ms <= session_.last_sli_rx_ms) {
-            return "sli_non_monotonic";
+            // Hard rejection: time sequence violated
+            return "reject_non_monotonic";
         }
 
         const double delta_ms = static_cast<double>(rx_ms - session_.last_sli_rx_ms);
@@ -1046,13 +1069,17 @@ private:
             return "";
         }
 
+        // FPS budget exceeded: behavior depends on drop policy
         if (session_.slam_cfg.drop_policy == DropPolicy::Reject) {
-            return "drop_reject_policy";
+            // Hard rejection: refuse to accept
+            return "reject_fps_budget";
         }
         if (session_.slam_cfg.drop_policy == DropPolicy::DropNewest) {
-            return "drop_newest_overload";
+            // Overload degradation: drop incoming frame
+            return "overload_budget_newest";
         }
-        return "drop_oldest_overload";
+        // Overload degradation: drop oldest buffered frame
+        return "overload_budget_oldest";
     }
 
     std::string emitAck(bool ok,
@@ -1105,12 +1132,30 @@ private:
     }
 
     bool shouldRollback() const {
-        if (metrics_.ack_total < 20) {
+        // Require sufficient sample history before making rollback recommendation
+        if (metrics_.ack_total < 100) {
             return false;
         }
+
+        // Check error rate: > 5% indicates degradation
         const double err_rate = static_cast<double>(metrics_.ack_err) / static_cast<double>(metrics_.ack_total);
+        if (err_rate > 0.05) {
+            return true;
+        }
+
+        // Check p95 latency: > 100ms indicates processing bottleneck (based on executor timeout of ~60ms)
         const std::uint64_t p95 = percentile(metrics_.ack_down_ms_samples, 95.0);
-        return err_rate > 0.10 || p95 > 80;
+        if (p95 > 100) {
+            return true;
+        }
+
+        // Check timeout rate: any sustained timeout pattern is concerning
+        if (metrics_.executor_timeout > 0 && 
+            metrics_.executor_timeout > metrics_.ack_total / 50) {  // > 2% timeout rate
+            return true;
+        }
+
+        return false;
     }
 
     static constexpr float kHardLimitHz = 100.0f;
