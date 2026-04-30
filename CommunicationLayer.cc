@@ -74,11 +74,10 @@ public:
             if (traced_msg.error == "sli_disabled") {
                 metrics_.sli_drop += 1;
             }
-            double dl_ms = 0.0;
-            const std::string ack = buildAck("ERR", traced_msg.seq, "gw_bad_msg:" + traced_msg.error,
-                                             recv_ms, -1.0, recv_tp, "parse_reject",
-                                             traced_msg.trace_id, &dl_ms);
-            recordAck(false, dl_ms);
+            const std::string ack = buildAck(false, traced_msg.seq, 0, 0,
+                                             "gw_bad_msg", traced_msg.error,
+                                             trace_id, "parse_reject");
+            recordAck(false, 0.0);
             return ack;
         }
 
@@ -88,20 +87,21 @@ public:
             std::chrono::steady_clock::now() - route_begin).count() / 1000.0;
         if (route_ms > static_cast<double>(switches_.route_timeout_ms)) {
             metrics_.route_timeout += 1;
-            double dl_ms = 0.0;
-            const std::string ack = buildAck("ERR", traced_msg.seq, "route_timeout", recv_ms,
-                                             computeUplinkMs(traced_msg, recv_ms), recv_tp,
-                                             "route_timeout", traced_msg.trace_id, &dl_ms);
-            recordAck(false, dl_ms);
+            const std::string ack = buildAck(false, traced_msg.seq, 0, 0,
+                                             "gw_route_timeout", "timeout",
+                                             trace_id, "route_timeout");
+            recordAck(false, 0.0);
             return ack;
         }
 
-        double dl_ms = 0.0;
-        const std::string ack = buildAck("OK", traced_msg.seq, "gw_forwarded", recv_ms,
-                                         computeUplinkMs(traced_msg, recv_ms), recv_tp,
-                                         processor_ack, traced_msg.trace_id, &dl_ms);
-        recordAck(true, dl_ms);
-        return ack;
+        // Parse processor ACK and append gateway context
+        ProcessorAckFields processor_fields = parseProcessorAck(processor_ack);
+        const std::string gw_ack = buildAck(processor_fields.ok, processor_fields.seq,
+                                             processor_fields.up_ms, processor_fields.down_ms,
+                                             processor_fields.tag, processor_fields.detail,
+                                             trace_id, "forwarded");
+        recordAck(processor_fields.ok, static_cast<double>(processor_fields.down_ms));
+        return gw_ack;
     }
 
 private:
@@ -475,39 +475,72 @@ private:
         return msg;
     }
 
+    struct ProcessorAckFields {
+        bool ok = false;
+        std::uint32_t seq = 0;
+        std::uint64_t up_ms = 0;
+        std::uint64_t down_ms = 0;
+        std::string tag = "unknown";
+        std::string detail = "parse_error";
+    };
+
+    static ProcessorAckFields parseProcessorAck(const std::string& ack_str) {
+        ProcessorAckFields fields;
+        std::istringstream iss(ack_str);
+        
+        std::string ack_kw, status;
+        if (!(iss >> ack_kw >> status)) {
+            return fields;  // Invalid format
+        }
+        
+        fields.ok = (status == "OK");
+        
+        std::string kv;
+        while (iss >> kv) {
+            std::string key, value;
+            if (!parseKVToken(kv, &key, &value)) {
+                continue;
+            }
+            if (key == "seq") {
+                parseUInt32(value, &fields.seq);
+            } else if (key == "up_ms") {
+                parseUInt64(value, &fields.up_ms);
+            } else if (key == "down_ms") {
+                parseUInt64(value, &fields.down_ms);
+            } else if (key == "tag") {
+                fields.tag = value;
+            } else if (key == "detail") {
+                fields.detail = value;
+            }
+        }
+        return fields;
+    }
+
+    static std::string buildAck(bool ok,
+                                std::uint32_t seq,
+                                std::uint64_t up_ms,
+                                std::uint64_t down_ms,
+                                const std::string& tag,
+                                const std::string& detail,
+                                const std::string& gw_trace,
+                                const std::string& gw_route) {
+        std::ostringstream oss;
+        oss << "ACK " << (ok ? "OK" : "ERR")
+            << " seq=" << seq
+            << " up_ms=" << up_ms
+            << " down_ms=" << down_ms
+            << " tag=" << tag
+            << " detail=" << detail
+            << " gw_trace=" << gw_trace
+            << " gw_route=" << gw_route;
+        return oss.str();
+    }
+
     static double computeUplinkMs(const ParsedMessage& msg, std::uint64_t recv_ms) {
         if (!msg.has_client_ts || recv_ms < msg.client_ts_ms) {
             return -1.0;
         }
         return static_cast<double>(recv_ms - msg.client_ts_ms);
-    }
-
-    static std::string buildAck(const std::string& code,
-                                std::uint32_t seq,
-                                const std::string& detail,
-                                std::uint64_t recv_ms,
-                                double uplink_ms,
-                                const std::chrono::steady_clock::time_point& recv_tp,
-                                const std::string& route_result,
-                                const std::string& trace_id,
-                                double* downlink_ms_out) {
-        const auto send_tp = std::chrono::steady_clock::now();
-        const double downlink_ms =
-            std::chrono::duration_cast<std::chrono::microseconds>(send_tp - recv_tp).count() / 1000.0;
-        if (downlink_ms_out != nullptr) {
-            *downlink_ms_out = downlink_ms;
-        }
-
-        std::ostringstream oss;
-        oss << "ACK " << code
-            << " seq=" << seq
-            << " detail=" << detail
-            << " rx_ms=" << recv_ms
-            << " ul_ms=" << std::fixed << std::setprecision(2) << uplink_ms
-            << " dl_ms=" << downlink_ms
-            << " trace=" << trace_id
-            << " route=" << route_result;
-        return oss.str();
     }
 
     static bool parseOnOff(const std::string& value, bool* out) {
@@ -537,9 +570,12 @@ private:
         } else {
             metrics_.ack_err += 1;
         }
-        metrics_.ack_dl_ms_samples.push_back(downlink_ms);
-        if (metrics_.ack_dl_ms_samples.size() > kMaxAckSamples) {
-            metrics_.ack_dl_ms_samples.pop_front();
+        // Only record downlink_ms if > 0 (gateway processing delay)
+        if (downlink_ms > 0.0) {
+            metrics_.ack_dl_ms_samples.push_back(downlink_ms);
+            if (metrics_.ack_dl_ms_samples.size() > kMaxAckSamples) {
+                metrics_.ack_dl_ms_samples.pop_front();
+            }
         }
     }
 
@@ -601,10 +637,9 @@ private:
             return false;
         }
         if (!(iss >> h1)) {
-            double dl_ms = 0.0;
-            *response = buildAck("ERR", 0, "gw_cmd_missing", recv_ms, -1.0,
-                                 recv_tp, "mgmt", "gw-mgmt", &dl_ms);
-            recordAck(false, dl_ms);
+            *response = buildAck(false, 0, 0, 0, "gw_bad_cmd", "cmd_missing",
+                                 nextTraceId(), "mgmt");
+            recordAck(false, 0.0);
             return true;
         }
 
@@ -617,10 +652,9 @@ private:
             switches_.legacy_alias_enabled = true;
             switches_.sli_enabled = true;
             switches_.route_timeout_ms = 80;
-            double dl_ms = 0.0;
-            *response = buildAck("OK", 0, "rollback_applied", recv_ms, -1.0,
-                                 recv_tp, buildHealthSnapshot(), "gw-mgmt", &dl_ms);
-            recordAck(true, dl_ms);
+            *response = buildAck(true, 0, 0, 0, "gw_rollback", "ok",
+                                 nextTraceId(), "mgmt");
+            recordAck(true, 0.0);
             return true;
         }
 
@@ -631,71 +665,63 @@ private:
                 std::string key;
                 std::string value;
                 if (!parseKVToken(kv, &key, &value)) {
-                    double dl_ms = 0.0;
-                    *response = buildAck("ERR", 0, "gw_switch_bad_kv", recv_ms, -1.0,
-                                         recv_tp, "mgmt", "gw-mgmt", &dl_ms);
-                    recordAck(false, dl_ms);
+                    *response = buildAck(false, 0, 0, 0, "gw_bad_switch", "bad_kv",
+                                         nextTraceId(), "mgmt");
+                    recordAck(false, 0.0);
                     return true;
                 }
                 if (key == "legacy_alias") {
                     bool parsed = false;
                     if (!parseOnOff(value, &parsed)) {
-                        double dl_ms = 0.0;
-                        *response = buildAck("ERR", 0, "gw_switch_bad_legacy_alias", recv_ms, -1.0,
-                                             recv_tp, "mgmt", "gw-mgmt", &dl_ms);
-                        recordAck(false, dl_ms);
+                        *response = buildAck(false, 0, 0, 0, "gw_bad_switch", "bad_legacy_alias",
+                                             nextTraceId(), "mgmt");
+                        recordAck(false, 0.0);
                         return true;
                     }
                     switches_.legacy_alias_enabled = parsed;
                 } else if (key == "sli_enabled") {
                     bool parsed = false;
                     if (!parseOnOff(value, &parsed)) {
-                        double dl_ms = 0.0;
-                        *response = buildAck("ERR", 0, "gw_switch_bad_sli_enabled", recv_ms, -1.0,
-                                             recv_tp, "mgmt", "gw-mgmt", &dl_ms);
-                        recordAck(false, dl_ms);
+                        *response = buildAck(false, 0, 0, 0, "gw_bad_switch", "bad_sli_enabled",
+                                             nextTraceId(), "mgmt");
+                        recordAck(false, 0.0);
                         return true;
                     }
                     switches_.sli_enabled = parsed;
                 } else if (key == "route_timeout_ms") {
                     int timeout_ms = 0;
                     if (!parseInt(value, &timeout_ms) || timeout_ms <= 0 || timeout_ms > 5000) {
-                        double dl_ms = 0.0;
-                        *response = buildAck("ERR", 0, "gw_switch_bad_route_timeout", recv_ms, -1.0,
-                                             recv_tp, "mgmt", "gw-mgmt", &dl_ms);
-                        recordAck(false, dl_ms);
+                        *response = buildAck(false, 0, 0, 0, "gw_bad_switch", "bad_route_timeout",
+                                             nextTraceId(), "mgmt");
+                        recordAck(false, 0.0);
                         return true;
                     }
                     switches_.route_timeout_ms = static_cast<std::uint32_t>(timeout_ms);
                 } else {
-                    double dl_ms = 0.0;
-                    *response = buildAck("ERR", 0, "gw_switch_unknown_key", recv_ms, -1.0,
-                                         recv_tp, "mgmt", "gw-mgmt", &dl_ms);
-                    recordAck(false, dl_ms);
+                    *response = buildAck(false, 0, 0, 0, "gw_bad_switch", "unknown_key",
+                                         nextTraceId(), "mgmt");
+                    recordAck(false, 0.0);
                     return true;
                 }
                 saw_any = true;
             }
 
             if (!saw_any) {
-                double dl_ms = 0.0;
-                *response = buildAck("ERR", 0, "gw_switch_empty", recv_ms, -1.0,
-                                     recv_tp, "mgmt", "gw-mgmt", &dl_ms);
-                recordAck(false, dl_ms);
+                *response = buildAck(false, 0, 0, 0, "gw_bad_switch", "empty",
+                                     nextTraceId(), "mgmt");
+                recordAck(false, 0.0);
                 return true;
             }
 
-            double dl_ms = 0.0;
-            *response = buildAck("OK", 0, "gw_switch_applied", recv_ms, -1.0,
-                                 recv_tp, buildHealthSnapshot(), "gw-mgmt", &dl_ms);
-            recordAck(true, dl_ms);
+            *response = buildAck(true, 0, 0, 0, "gw_switch", "applied",
+                                 nextTraceId(), "mgmt");
+            recordAck(true, 0.0);
             return true;
         }
 
-        double dl_ms = 0.0;
-        *response = buildAck("ERR", 0, "gw_cmd_unknown", recv_ms, -1.0,
-                             recv_tp, "mgmt", "gw-mgmt", &dl_ms);
-        recordAck(false, dl_ms);
+        *response = buildAck(false, 0, 0, 0, "gw_bad_cmd", "unknown",
+                             nextTraceId(), "mgmt");
+        recordAck(false, 0.0);
         return true;
     }
 
