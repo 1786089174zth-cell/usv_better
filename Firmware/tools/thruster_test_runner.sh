@@ -5,8 +5,8 @@ PWM_CHIP_DIR="/sys/class/pwm/pwmchip0"
 PWM1_DIR="$PWM_CHIP_DIR/pwm1"
 PWM2_DIR="$PWM_CHIP_DIR/pwm2"
 PERIOD_NS=20000000
-NEUTRAL_NS=1500000
-SPAN_NS=500000
+NEUTRAL_NS=0
+SPAN_NS=5000000
 
 HW_MODE=0
 if [[ "${1:-}" == "--hw" ]]; then
