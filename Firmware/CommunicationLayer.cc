@@ -1,14 +1,23 @@
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <iomanip>
 #include <iostream>
+#include <netinet/in.h>
 #include <sstream>
 #include <string>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <vector>
 
+#include <arpa/inet.h>
+
 namespace {
+
+constexpr std::uint16_t kDefaultListenPort = 19520;
 
 struct ParsedMessage {
     bool valid = false;
@@ -736,8 +745,172 @@ private:
     static constexpr std::size_t kMaxAckSamples = 256;
 };
 
+bool sendAll(int fd, const std::string& payload) {
+    std::size_t offset = 0;
+    while (offset < payload.size()) {
+        const ssize_t written = ::send(fd, payload.data() + offset, payload.size() - offset, 0);
+        if (written > 0) {
+            offset += static_cast<std::size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+std::string formatPeerAddress(const sockaddr_in& addr) {
+    char ip_buffer[INET_ADDRSTRLEN] = {};
+    const char* ip_text = ::inet_ntop(AF_INET, &addr.sin_addr, ip_buffer, sizeof(ip_buffer));
+    if (ip_text == nullptr) {
+        return "unknown";
+    }
+    std::ostringstream oss;
+    oss << ip_text << ':' << ntohs(addr.sin_port);
+    return oss.str();
+}
+
+int createListenSocket(std::uint16_t port, std::string* error) {
+    const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        if (error != nullptr) {
+            *error = std::string("socket_failed: ") + std::strerror(errno);
+        }
+        return -1;
+    }
+
+    int reuse = 1;
+    if (::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        if (error != nullptr) {
+            *error = std::string("setsockopt_failed: ") + std::strerror(errno);
+        }
+        ::close(listen_fd);
+        return -1;
+    }
+
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        if (error != nullptr) {
+            *error = std::string("bind_failed: ") + std::strerror(errno);
+        }
+        ::close(listen_fd);
+        return -1;
+    }
+
+    if (::listen(listen_fd, 8) < 0) {
+        if (error != nullptr) {
+            *error = std::string("listen_failed: ") + std::strerror(errno);
+        }
+        ::close(listen_fd);
+        return -1;
+    }
+
+    return listen_fd;
+}
+
+bool handleTcpClient(int client_fd, CommunicationLayer* comm, const std::string& peer_label) {
+    std::cout << "TCP client connected from " << peer_label << std::endl;
+
+    std::string buffer;
+    buffer.reserve(4096);
+    char chunk[4096];
+
+    while (true) {
+        const ssize_t received = ::recv(client_fd, chunk, sizeof(chunk), 0);
+        if (received > 0) {
+            buffer.append(chunk, static_cast<std::size_t>(received));
+
+            std::size_t newline_pos = std::string::npos;
+            while ((newline_pos = buffer.find('\n')) != std::string::npos) {
+                std::string line = buffer.substr(0, newline_pos);
+                buffer.erase(0, newline_pos + 1);
+
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+
+                if (line == "q" || line == "Q") {
+                    return true;
+                }
+
+                const std::string ack = comm->onReceive(line);
+                if (!sendAll(client_fd, ack + "\n")) {
+                    std::cout << "TCP client write failed for " << peer_label << std::endl;
+                    return false;
+                }
+            }
+            continue;
+        }
+
+        if (received == 0) {
+            return true;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        std::cout << "TCP client read failed for " << peer_label << ": "
+                  << std::strerror(errno) << std::endl;
+        return false;
+    }
+}
+
+int runTcpServer(CommunicationLayer* comm, std::uint16_t port) {
+    std::string error;
+    int listen_fd = createListenSocket(port, &error);
+    if (listen_fd < 0) {
+        std::cerr << "Port " << port << " unavailable: " << error << "; scanning ports 1..20000\n";
+        // Try to find an available port in range 1..20000 (do not kill other processes)
+        for (std::uint16_t p = 1; p <= 20000; ++p) {
+            if (p == port) continue;
+            listen_fd = createListenSocket(p, &error);
+            if (listen_fd >= 0) {
+                std::cout << "Bound to available port " << p << " instead of requested " << port << std::endl;
+                port = p;
+                break;
+            }
+        }
+    }
+
+    if (listen_fd < 0) {
+        std::cerr << "Failed to start TCP listener on ports 1..20000: " << error << std::endl;
+        return 1;
+    }
+
+    std::cout << "Communication layer listening on 0.0.0.0:" << port << std::endl;
+
+    while (true) {
+        sockaddr_in client_addr {};
+        socklen_t client_len = sizeof(client_addr);
+        const int client_fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+        if (client_fd < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "accept_failed: " << std::strerror(errno) << std::endl;
+            ::close(listen_fd);
+            return 1;
+        }
+
+        const std::string peer_label = formatPeerAddress(client_addr);
+        const bool ok = handleTcpClient(client_fd, comm, peer_label);
+        ::close(client_fd);
+        std::cout << "TCP client disconnected from " << peer_label
+                  << " status=" << (ok ? "normal" : "error") << std::endl;
+    }
+}
+
 void printUsage() {
     std::cout << "Communication Layer (Gateway Adapter)\n"
+              << "TCP listener: 0.0.0.0:" << kDefaultListenPort << "\n"
+              << "Line protocol: one command per line, newline-delimited over TCP\n"
               << "Realtime short frame:\n"
               << "  R <seq> <F|L|R> [client_ts_ms]\n"
               << "  RT <seq> <F|L|R> [client_ts_ms]  # legacy alias\n"
@@ -766,13 +939,5 @@ int main() {
     CommunicationLayer comm(std::move(processor_client));
 
     printUsage();
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        if (line == "q" || line == "Q") {
-            break;
-        }
-        std::cout << comm.onReceive(line) << std::endl;
-    }
-
-    return 0;
+    return runTcpServer(&comm, kDefaultListenPort);
 }

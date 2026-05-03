@@ -3,13 +3,13 @@
 ## Overview
 This workspace contains a lightweight three-layer demo for USV edge validation.
 Current focus is Step3 gateway extension on top of Step2:
-- Communication layer parses and forwards normalized frames.
+- Communication layer exposes a TCP listener and parses/forwards normalized frames.
 - Communication layer can ingest `SR` row requests and generate row-feature `SLI` payload metadata.
 - Main processor owns control + SLAM ingest + fusion semantics.
 - SLAM executor is currently a mock client with stable interface.
 
 ## Files
-- `CommunicationLayer.cc`: short-frame communication parser/ack demo
+- `CommunicationLayer.cc`: TCP gateway adapter demo with line-oriented protocol handling
 - `MainProcessor.cc`: processing layer parser/dispatcher demo
 - `SlamExecutionLayer.h/.cc`: dedicated hub-to-SLAM execution bridge + RGB row preprocessing
 - `TrusterAcuator.cc`: actuator mapping/output demo
@@ -21,6 +21,8 @@ g++ -std=c++17 -Wall -Wextra -pedantic CommunicationLayer.cc -o communication_la
 g++ -std=c++17 -Wall -Wextra -pedantic MainProcessor.cc SlamExecutionLayer.cc -o main_processor_demo
 g++ -std=c++17 -Wall -Wextra -pedantic TrusterAcuator.cc -o truster_actuator_demo
 ```
+
+Run the communication layer with `./communication_layer_demo`. It listens on TCP port 19520 and accepts one line command per message.
 
 ## Thruster PWM Validation
 
@@ -54,6 +56,8 @@ Runtime mapping used by the script:
 - Negative values are rejected; there is no reverse thrust path in the validation flow
 
 ## Communication Frames
+
+All communication frames are newline-delimited text sent over TCP to `127.0.0.1:19520` or the host IP that runs the gateway.
 
 ### 1) Realtime short frame
 ```text
@@ -135,15 +139,20 @@ printf 'C START seq=1 ts=100 soft_hz=20 max_power=60 left_gain=1 right_gain=1 le
 ```
 
 ```bash
-printf 'C START seq=1 ts=100 soft_hz=20 max_power=60 left_gain=1 right_gain=1 left_trim=0 right_trim=0 slam_max_fps=8 slam_timeout_ms=60 slam_max_groups=4 slam_min_quality=15 slam_drop_policy=newest row_ratio=0.333333 channel_mode=G sample_stride=2 max_rows=1 pack_mode=bin\nSR 2 101 frame_id=11 width=64 height=48 payload_ref=buf_11 keyframe=1 quality_hint=70\nC STOP seq=3 ts=120\nq\n' | ./communication_layer_demo
+./communication_layer_demo
+```
+
+In another terminal:
+```bash
+printf 'C START seq=1 ts=100 soft_hz=20 max_power=60 left_gain=1 right_gain=1 left_trim=0 right_trim=0 slam_max_fps=8 slam_timeout_ms=60 slam_max_groups=4 slam_min_quality=15 slam_drop_policy=newest row_ratio=0.333333 channel_mode=G sample_stride=2 max_rows=1 pack_mode=bin\nSR 2 101 frame_id=11 width=64 height=48 payload_ref=buf_11 keyframe=1 quality_hint=70\nC STOP seq=3 ts=120\nq\n' | nc 127.0.0.1 19520
 ```
 
 ```bash
-printf 'GW HEALTH\nGW SWITCH legacy_alias=off route_timeout_ms=40\nGW HEALTH\nGW ROLLBACK\nGW HEALTH\nq\n' | ./communication_layer_demo
+printf 'GW HEALTH\nGW SWITCH legacy_alias=off route_timeout_ms=40\nGW HEALTH\nGW ROLLBACK\nGW HEALTH\nq\n' | nc 127.0.0.1 19520
 ```
 
 ```bash
-printf 'HEALTH\nq\n' | ./main_processor_demo
+printf 'HEALTH\nq\n' | nc 127.0.0.1 19520
 ```
 
 ## Processor-Executor Reserved Interface

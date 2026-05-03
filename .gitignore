@@ -10,3 +10,8 @@ wlan_watchdog.sh
 sel_smoke_5s.log
 sel_smoke_revert.log
 GLOBAL_READINESS.md
+Firmware/tools/WlanReconnector.sh
+.vscode/launch.json
+.vscode/tasks.json
+Firmware/communication_layer_demo
+Firmware/server.log
