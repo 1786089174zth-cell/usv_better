@@ -107,6 +107,7 @@ public:
     bool GetHealth() const;
 
     bool InitializeD435i(std::string* error = nullptr);
+    void EnableMockD435i(bool enabled);
     void ShutdownD435i();
 
     bool CaptureD435iFrame(std::uint32_t timeout_ms,

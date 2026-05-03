@@ -54,7 +54,7 @@ std::string formatSampleLine(const slam_exec::D435iFrameSample& sample) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     constexpr std::uint32_t kSessionId = 1u;
     constexpr std::uint32_t kConfigVersion = 1u;
     constexpr int kRunSeconds = 10;
@@ -69,7 +69,15 @@ int main() {
     cfg.row_ratio = row_ratio;
     cfg.sample_stride = sample_stride;
 
+    bool use_mock = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "+mock" || std::string(argv[i]) == "--mock") {
+            use_mock = true;
+        }
+    }
+
     SlamExecutionLayerClient client;
+    client.EnableMockD435i(use_mock);
     std::string init_error;
     if (!client.InitializeD435i(&init_error)) {
         std::cerr << "D435i init failed: " << init_error << std::endl;
