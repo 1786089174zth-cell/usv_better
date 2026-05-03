@@ -78,7 +78,7 @@ SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12>
 SR <seq> <tx_ms> frame_id=<n> width=<w> height=<h> payload_ref=<id> keyframe=<0|1> quality_hint=<0..100>
 ```
 - Used by gateway Step3 path to fetch RGB frame from adapter, extract one row, and re-upload as `SLI feature=row ...`.
-- If local socket adapter is unavailable, demo falls back to deterministic mock frame source.
+- This path requires an explicit frame source from adapter/integration; there is no automatic fallback to mock input.
 
 ### 4) Config long frame
 ```text
