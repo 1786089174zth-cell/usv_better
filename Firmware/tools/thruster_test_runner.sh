@@ -5,10 +5,6 @@ PWM_CHIP_DIR="/sys/class/pwm/pwmchip0"
 PWM1_DIR="$PWM_CHIP_DIR/pwm1"
 PWM2_DIR="$PWM_CHIP_DIR/pwm2"
 PERIOD_NS=20000000
-NEUTRAL_NS=0
-SPAN_NS=5000000
-
-
 sysfs_write() {
   local path="$1"
   local value="$2"
@@ -44,33 +40,19 @@ ensure_pwm_exported() {
   return 1
 }
 
-clamp_duty_to_period() {
-  local duty="$1"
-  awk -v d="$duty" -v p="$PERIOD_NS" 'BEGIN {
-    max = p - 1;
-    if (max < 0) max = 0;
-    if (d < 0) d = 0;
-    if (d > max) d = max;
-    printf "%.0f", d;
-  }'
-}
-
 HW_MODE=0
 if [[ "${1:-}" == "--hw" ]]; then
   HW_MODE=1
 fi
 
-percent_to_duty_ns() {
+percent_to_binary_duty_ns() {
   local percent="$1"
-  awk -v p="$percent" -v n="$NEUTRAL_NS" -v s="$SPAN_NS" 'BEGIN {
-    if (p < 0) p = 0;
-    if (p > 100) p = 100;
-    duty = n + (p / 100.0) * s;
-    min = n;
-    max = n + s;
-    if (duty < min) duty = min;
-    if (duty > max) duty = max;
-    printf "%.0f", duty;
+  awk -v p="$percent" -v period="$PERIOD_NS" 'BEGIN {
+    if (p <= 0) {
+      print 0;
+    } else {
+      print period;
+    }
   }'
 }
 
@@ -79,11 +61,8 @@ write_duty_pair() {
   local right_percent="$2"
   local left_duty right_duty
 
-  left_duty="$(percent_to_duty_ns "$left_percent")"
-  right_duty="$(percent_to_duty_ns "$right_percent")"
-
-  left_duty="$(clamp_duty_to_period "$left_duty")"
-  right_duty="$(clamp_duty_to_period "$right_duty")"
+  left_duty="$(percent_to_binary_duty_ns "$left_percent")"
+  right_duty="$(percent_to_binary_duty_ns "$right_percent")"
 
   if [[ $HW_MODE -eq 1 ]]; then
     sysfs_write "$PWM1_DIR/duty_cycle" "$left_duty"
@@ -138,9 +117,10 @@ fi
 
 echo "Running in $([[ $HW_MODE -eq 1 ]] && echo HW || echo dry-run) mode"
 echo "Input format: <left_percent> <right_percent>"
-echo "Percent range: 0 to 100 only, mapped from neutral duty ${NEUTRAL_NS}ns up to ${NEUTRAL_NS}ns + ${SPAN_NS}ns"
+echo "Percent range: 0 to 100 only, mapped in binary mode"
+echo "Mapping rule: 0 -> 0ns, positive value -> ${PERIOD_NS}ns"
 echo "Type q to quit."
-echo "Safety: 0% always maps to duty_ns=0 (hard stop)."
+echo "Safety: 0% always maps to duty_ns=0 (hard stop), positive values force ON."
 echo "Hardware pin mapping: pwm1 -> pin8 (PH3), pwm2 -> pin10 (PH2)"
 
 step=0

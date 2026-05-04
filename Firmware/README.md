@@ -73,13 +73,14 @@ Runtime mapping used by the script:
 
 ### 1) Realtime short frame
 ```text
-R <seq> <F|L|R> [client_ts_ms]
+R <seq> <F|L|R|S> [client_ts_ms]
 ```
 - Used for high-rate action control.
 - Requires active session started by `C START`.
 - Gateway normalizes this to processor format: `R <seq> <tx_ms> <action>`.
 - Legacy alias `RT` is accepted by the gateway and normalized to `R`.
-- Realtime commands are positive-only; reverse thrust is not part of the motion vocabulary.
+- Realtime commands keep FLRS semantics: `F` forward, `L` turn-left, `R` turn-right, `S` runtime stop.
+- `C STOP` remains a session stop command and is separate from realtime `S`.
 
 ### 2) SLAM image ingest frame
 ```text
