@@ -18,6 +18,7 @@
 namespace {
 
 constexpr std::uint16_t kDefaultListenPort = 19520;
+constexpr std::uint16_t kListenPorts[] = {19520, 9773, 11514, 23758, 52019};
 
 struct ParsedMessage {
     bool valid = false;
@@ -864,23 +865,30 @@ bool handleTcpClient(int client_fd, CommunicationLayer* comm, const std::string&
 
 int runTcpServer(CommunicationLayer* comm, std::uint16_t port) {
     std::string error;
-    int listen_fd = createListenSocket(port, &error);
-    if (listen_fd < 0) {
-        std::cerr << "Port " << port << " unavailable: " << error << "; scanning ports 1..20000\n";
-        // Try to find an available port in range 1..20000 (do not kill other processes)
-        for (std::uint16_t p = 1; p <= 20000; ++p) {
-            if (p == port) continue;
-            listen_fd = createListenSocket(p, &error);
-            if (listen_fd >= 0) {
-                std::cout << "Bound to available port " << p << " instead of requested " << port << std::endl;
-                port = p;
-                break;
+    int listen_fd = -1;
+    for (std::uint16_t candidate_port : kListenPorts) {
+        listen_fd = createListenSocket(candidate_port, &error);
+        if (listen_fd >= 0) {
+            port = candidate_port;
+            if (candidate_port != kDefaultListenPort) {
+                std::cout << "Default port " << kDefaultListenPort
+                          << " unavailable; bound to fallback port " << candidate_port << std::endl;
             }
+            break;
         }
+
+        std::cerr << "Port " << candidate_port << " unavailable: " << error << std::endl;
     }
 
     if (listen_fd < 0) {
-        std::cerr << "Failed to start TCP listener on ports 1..20000: " << error << std::endl;
+        std::cerr << "Failed to start TCP listener: all configured ports are occupied [";
+        for (std::size_t i = 0; i < sizeof(kListenPorts) / sizeof(kListenPorts[0]); ++i) {
+            std::cerr << kListenPorts[i];
+            if (i + 1 < sizeof(kListenPorts) / sizeof(kListenPorts[0])) {
+                std::cerr << ",";
+            }
+        }
+        std::cerr << "]" << std::endl;
         return 1;
     }
 
@@ -909,7 +917,7 @@ int runTcpServer(CommunicationLayer* comm, std::uint16_t port) {
 
 void printUsage() {
     std::cout << "Communication Layer (Gateway Adapter)\n"
-              << "TCP listener: 0.0.0.0:" << kDefaultListenPort << "\n"
+              << "TCP listener: 0.0.0.0:" << kDefaultListenPort << " (fallback order: 19520, 9773, 11514, 23758, 52019)\n"
               << "Line protocol: one command per line, newline-delimited over TCP\n"
               << "Realtime short frame:\n"
               << "  R <seq> <F|L|R> [client_ts_ms]\n"
