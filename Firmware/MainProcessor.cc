@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "SlamExecutionLayer.h"
@@ -19,6 +20,7 @@ enum class ActionType {
     Forward,
     TurnLeft,
     TurnRight,
+    Stop,
     Zero,
     Invalid,
 };
@@ -310,12 +312,11 @@ private:
 class ControlDownlink {
 public:
     bool sendAction(ActionType action, const ControlConfig& cfg) {
+        (void)cfg;
+        const auto duty_pair = actionToDutyNs(action);
         std::cout << "DOWNLINK action=" << actionToString(action)
-                  << " max_power=" << cfg.max_power
-                  << " left_gain=" << cfg.left_gain
-                  << " right_gain=" << cfg.right_gain
-                  << " left_trim=" << cfg.left_trim
-                  << " right_trim=" << cfg.right_trim << std::endl;
+                  << " left_duty_ns=" << duty_pair.first
+                  << " right_duty_ns=" << duty_pair.second << std::endl;
         return true;
     }
 
@@ -340,6 +341,24 @@ public:
     }
 
 private:
+    static std::pair<int, int> actionToDutyNs(ActionType action) {
+        constexpr int kDutyOffNs = 0;
+        constexpr int kDutyOnNs = 20000000;
+        switch (action) {
+            case ActionType::Forward:
+                return {kDutyOnNs, kDutyOnNs};
+            case ActionType::TurnLeft:
+                return {kDutyOffNs, kDutyOnNs};
+            case ActionType::TurnRight:
+                return {kDutyOnNs, kDutyOffNs};
+            case ActionType::Stop:
+            case ActionType::Zero:
+            case ActionType::Invalid:
+            default:
+                return {kDutyOffNs, kDutyOffNs};
+        }
+    }
+
     static std::string actionToString(ActionType action) {
         switch (action) {
             case ActionType::Forward:
@@ -348,6 +367,8 @@ private:
                 return "LEFT";
             case ActionType::TurnRight:
                 return "RIGHT";
+            case ActionType::Stop:
+                return "STOP";
             case ActionType::Zero:
                 return "ZERO";
             default:
@@ -427,6 +448,9 @@ std::optional<ActionType> parseActionToken(const std::string& token) {
     }
     if (token == "R") {
         return ActionType::TurnRight;
+    }
+    if (token == "S") {
+        return ActionType::Stop;
     }
     return std::nullopt;
 }

@@ -41,12 +41,14 @@ fi
 
 echo "Using TrusterAcuator binary: $TA_BIN"
 echo "交互式模式：输入两列 0..100 的百分比（left right），回车发送；输入 q 退出。"
+echo "Binary 输出规则：0 -> 0ns，正值 -> 20000000ns。"
 echo "Safety: 0 0 = hard stop (duty 0)."
 
 print_help() {
   cat <<EOF
 示例：
-  30 40    # 左推进器 30%, 右推进器 40%
+  30 40    # 左右都将映射为 ON (20000000ns)
+  0 40     # 左 OFF, 右 ON
   0 0      # 停止
   q        # 退出
 EOF

@@ -71,13 +71,15 @@ private:
 	}
 
 	int percentToDutyNs(float percent) const {
-		const float ratio = percent / 100.0f;
-		const float duty = static_cast<float>(cfg_.duty_neutral_ns) +
-						   ratio * static_cast<float>(cfg_.duty_span_ns);
-		const int min_duty = 0;
-		const int max_duty = std::max(0, cfg_.pwm_period_ns - 1);
-		return static_cast<int>(std::round(clamp(duty, static_cast<float>(min_duty),
-												 static_cast<float>(max_duty))));
+		// Keep PWM shaping config in place for future hardware features, but
+		// decouple it from current output behavior.
+		// Current runtime behavior is binary:
+		//   0 or negative -> 0ns
+		//   positive      -> full period (20000000ns by default)
+		if (percent <= 0.0f) {
+			return 0;
+		}
+		return std::max(0, cfg_.pwm_period_ns);
 	}
 
 	MapperConfig cfg_;
