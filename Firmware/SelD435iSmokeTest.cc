@@ -8,10 +8,8 @@
 #include <thread>
 #include <vector>
 
-using slam_exec::ExecutorResult;
 using slam_exec::SlamConfig;
 using slam_exec::SlamExecutionLayerClient;
-using slam_exec::SlamImageFrame;
 
 namespace {
 
@@ -56,7 +54,7 @@ std::string formatSampleLine(const slam_exec::D435iFrameSample& sample) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     constexpr std::uint32_t kSessionId = 1u;
     constexpr std::uint32_t kConfigVersion = 1u;
     constexpr int kRunSeconds = 10;
@@ -71,7 +69,15 @@ int main() {
     cfg.row_ratio = row_ratio;
     cfg.sample_stride = sample_stride;
 
+    bool use_mock = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "+mock" || std::string(argv[i]) == "--mock") {
+            use_mock = true;
+        }
+    }
+
     SlamExecutionLayerClient client;
+    client.EnableMockD435i(use_mock);
     std::string init_error;
     if (!client.InitializeD435i(&init_error)) {
         std::cerr << "D435i init failed: " << init_error << std::endl;
@@ -87,68 +93,68 @@ int main() {
     const std::uint64_t end_ms = start_ms + static_cast<std::uint64_t>(kRunSeconds * 1000);
     const std::uint32_t frame_interval_ms = static_cast<std::uint32_t>(1000 / max_fps);
 
-    std::uint32_t frame_id = 0;
     std::uint32_t sent = 0;
     std::uint32_t ok = 0;
     std::uint32_t timeout = 0;
     std::uint32_t err = 0;
-    std::uint32_t groups_total = 0;
-    std::uint32_t quality_total = 0;
-    ExecutorResult last_result;
     std::uint32_t capture_err = 0;
+    std::uint32_t ready_true = 0;
+    std::uint64_t capture_ms_total = 0;
+    std::uint32_t capture_ms_max = 0;
     std::string capture_error;
 
     while (nowMs() < end_ms) {
+        const std::uint64_t t0 = nowMs();
         slam_exec::D435iFrameSample sample;
         capture_error.clear();
         const bool have_sample = client.CaptureD435iFrame(exec_timeout_ms, cfg, &sample, &capture_error);
+        const std::uint32_t capture_ms = static_cast<std::uint32_t>(nowMs() - t0);
+        capture_ms_total += capture_ms;
+        if (capture_ms > capture_ms_max) {
+            capture_ms_max = capture_ms;
+        }
+        if (client.IsD435iReady()) {
+            ready_true++;
+        }
+
         if (!have_sample) {
             capture_err++;
-            std::cout << "capture_err=" << capture_error << std::endl;
+            if (capture_error.find("didn't arrive within") != std::string::npos ||
+                capture_error.find("timeout") != std::string::npos) {
+                timeout++;
+            } else {
+                err++;
+            }
+            std::cout << "capture_err=" << capture_error
+                      << " capture_ms=" << capture_ms
+                      << " ready=" << (client.IsD435iReady() ? "true" : "false")
+                      << std::endl;
         } else {
-            std::cout << formatSampleLine(sample) << std::endl;
-        }
-
-        SlamImageFrame frame;
-        frame.seq = sent;
-        frame.tx_ms = nowMs();
-        frame.frame_id = ++frame_id;
-        frame.width = 640;
-        frame.height = 480;
-        frame.pixel_fmt = "BGR8";
-        frame.keyframe = (frame_id % 30 == 0);
-        frame.quality_hint = 60;
-        frame.payload_ref = "d435i_live";
-
-        const ExecutorResult result = client.ProcessFrame(kSessionId, frame, exec_timeout_ms);
-        last_result = result;
-        sent++;
-        if (result.ok) {
             ok++;
-        } else if (result.timeout) {
-            timeout++;
-        } else {
-            err++;
+            std::cout << formatSampleLine(sample)
+                      << " capture_ms=" << capture_ms
+                      << " ready=true"
+                      << std::endl;
         }
-        groups_total += static_cast<std::uint32_t>(result.groups.size());
-        quality_total += static_cast<std::uint32_t>(result.quality_score);
+        sent++;
 
         if (sent % 10u == 0u) {
             std::cout << "tick=" << sent
                       << " ok=" << ok
                       << " timeout=" << timeout
                       << " err=" << err
-                      << " last_quality=" << result.quality_score
-                      << " last_groups=" << result.groups.size()
-                      << " last_proc_ms=" << result.proc_ms
+                      << " ready_rate=" << std::fixed << std::setprecision(2)
+                      << (sent > 0 ? (100.0 * static_cast<double>(ready_true) / static_cast<double>(sent)) : 0.0)
+                      << "% avg_capture_ms=" << (sent > 0 ? (static_cast<double>(capture_ms_total) / static_cast<double>(sent)) : 0.0)
+                      << " max_capture_ms=" << capture_ms_max
                       << std::endl;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(frame_interval_ms));
     }
 
-    const double avg_quality = sent > 0 ? static_cast<double>(quality_total) / sent : 0.0;
-    const double avg_groups = sent > 0 ? static_cast<double>(groups_total) / sent : 0.0;
+    const double avg_capture_ms = sent > 0 ? static_cast<double>(capture_ms_total) / static_cast<double>(sent) : 0.0;
+    const double ready_rate = sent > 0 ? (100.0 * static_cast<double>(ready_true) / static_cast<double>(sent)) : 0.0;
 
     std::cout << "\n=== SEL 10s D435i smoke test ===\n";
     std::cout << "sent=" << sent
@@ -156,16 +162,10 @@ int main() {
               << " timeout=" << timeout
               << " err=" << err
               << " capture_err=" << capture_err
-              << " avg_quality=" << avg_quality
-              << " avg_groups=" << avg_groups
+              << " ready_rate=" << ready_rate << "%"
+              << " avg_capture_ms=" << avg_capture_ms
+              << " max_capture_ms=" << capture_ms_max
               << " health=" << (client.GetHealth() ? "OK" : "BAD")
-              << std::endl;
-
-    std::cout << "last: ok=" << (last_result.ok ? "true" : "false")
-              << " timeout=" << (last_result.timeout ? "true" : "false")
-              << " quality=" << last_result.quality_score
-              << " proc_ms=" << last_result.proc_ms
-              << " groups=" << last_result.groups.size()
               << std::endl;
 
     client.StopSession(kSessionId);
