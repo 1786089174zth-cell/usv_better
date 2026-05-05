@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "SlamExecutionLayer.h"
@@ -19,6 +20,7 @@ enum class ActionType {
     Forward,
     TurnLeft,
     TurnRight,
+    Stop,
     Zero,
     Invalid,
 };
@@ -310,12 +312,11 @@ private:
 class ControlDownlink {
 public:
     bool sendAction(ActionType action, const ControlConfig& cfg) {
+        (void)cfg;
+        const auto duty_pair = actionToDutyNs(action);
         std::cout << "DOWNLINK action=" << actionToString(action)
-                  << " max_power=" << cfg.max_power
-                  << " left_gain=" << cfg.left_gain
-                  << " right_gain=" << cfg.right_gain
-                  << " left_trim=" << cfg.left_trim
-                  << " right_trim=" << cfg.right_trim << std::endl;
+                  << " left_duty_ns=" << duty_pair.first
+                  << " right_duty_ns=" << duty_pair.second << std::endl;
         return true;
     }
 
@@ -340,6 +341,24 @@ public:
     }
 
 private:
+    static std::pair<int, int> actionToDutyNs(ActionType action) {
+        constexpr int kDutyOffNs = 0;
+        constexpr int kDutyOnNs = 20000000;
+        switch (action) {
+            case ActionType::Forward:
+                return {kDutyOnNs, kDutyOnNs};
+            case ActionType::TurnLeft:
+                return {kDutyOffNs, kDutyOnNs};
+            case ActionType::TurnRight:
+                return {kDutyOnNs, kDutyOffNs};
+            case ActionType::Stop:
+            case ActionType::Zero:
+            case ActionType::Invalid:
+            default:
+                return {kDutyOffNs, kDutyOffNs};
+        }
+    }
+
     static std::string actionToString(ActionType action) {
         switch (action) {
             case ActionType::Forward:
@@ -348,6 +367,8 @@ private:
                 return "LEFT";
             case ActionType::TurnRight:
                 return "RIGHT";
+            case ActionType::Stop:
+                return "STOP";
             case ActionType::Zero:
                 return "ZERO";
             default:
@@ -427,6 +448,9 @@ std::optional<ActionType> parseActionToken(const std::string& token) {
     }
     if (token == "R") {
         return ActionType::TurnRight;
+    }
+    if (token == "S") {
+        return ActionType::Stop;
     }
     return std::nullopt;
 }
@@ -941,43 +965,36 @@ private:
 
         SlamOutput output;
         const std::uint64_t t0 = nowMs();
-        const ExecutorResult result = slam_executor_.ProcessFrame(
-            session_.session_id,
-            cmd.frame,
-            static_cast<std::uint32_t>(session_.slam_cfg.exec_timeout_ms));
+        slam_exec::D435iFrameSample capture_sample;
+        std::string capture_error;
+        const bool capture_ok = slam_executor_.CaptureD435iFrame(
+            static_cast<std::uint32_t>(session_.slam_cfg.exec_timeout_ms),
+            session_.slam_cfg,
+            &capture_sample,
+            &capture_error);
         const std::uint64_t down_ms = nowMs() - t0;
 
         output.control_state = session_.active ? 1 : 0;
-        output.proc_ms = result.proc_ms;
+        output.proc_ms = static_cast<int>(down_ms);
         output.source_ts = cmd.tx_ms;
-        output.quality_score = result.quality_score;
+        output.quality_score = capture_ok ? 100 : 0;
+        output.groups.clear();
 
-        if (result.timeout) {
-            output.slam_status = SlamStatus::ExecutorTimeout;
-            session_.slam_fusion.dropped_frames += 1;
-            metrics_.sli_drop += 1;
-            metrics_.executor_timeout += 1;
-            updateSlamFusionState(cmd, output);
-            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                           fail_tag, "executor_timeout");
-        }
-        if (!result.ok) {
+        if (!capture_ok) {
             output.slam_status = SlamStatus::ExecutorError;
             session_.slam_fusion.dropped_frames += 1;
             metrics_.sli_drop += 1;
+            if (capture_error.find("didn't arrive within") != std::string::npos ||
+                capture_error.find("timeout") != std::string::npos) {
+                output.slam_status = SlamStatus::ExecutorTimeout;
+                metrics_.executor_timeout += 1;
+            }
             updateSlamFusionState(cmd, output);
             return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                           fail_tag, "executor_error");
+                           fail_tag, capture_error.empty() ? "capture_error" : capture_error);
         }
 
         output.slam_status = SlamStatus::Normal;
-        output.groups = result.groups;
-        if (static_cast<int>(output.groups.size()) > session_.slam_cfg.max_groups) {
-            output.groups.resize(static_cast<std::size_t>(session_.slam_cfg.max_groups));
-        }
-        if (output.quality_score < session_.slam_cfg.min_quality) {
-            output.groups.clear();
-        }
 
         // If realtime commands are very close, keep control latency priority and only return status.
         if (session_.has_last_rt && rx_ms - session_.last_rt_rx_ms <= kRtPriorityWindowMs) {

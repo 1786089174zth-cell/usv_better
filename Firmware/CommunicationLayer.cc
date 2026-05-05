@@ -189,7 +189,7 @@ private:
         }
 
         if (mode == "R") {
-            // Realtime short frame: R <seq> <F|L|R> [client_ts_ms]
+            // Realtime short frame: R <seq> <F|L|R|S> [client_ts_ms]
             std::string seq_token;
             std::string action_token;
             if (!(iss >> seq_token >> action_token)) {
@@ -200,7 +200,7 @@ private:
                 msg.error = "rt_bad_seq";
                 return msg;
             }
-            if (!(action_token == "F" || action_token == "L" || action_token == "R")) {
+            if (!(action_token == "F" || action_token == "L" || action_token == "R" || action_token == "S")) {
                 msg.error = "rt_bad_action";
                 return msg;
             }
@@ -236,7 +236,7 @@ private:
                 msg.error = "rt_bad_seq";
                 return msg;
             }
-            if (!(action_token == "F" || action_token == "L" || action_token == "R")) {
+            if (!(action_token == "F" || action_token == "L" || action_token == "R" || action_token == "S")) {
                 msg.error = "rt_bad_action";
                 return msg;
             }
