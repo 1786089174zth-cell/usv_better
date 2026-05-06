@@ -68,6 +68,9 @@ struct ExecutorResult {
     std::vector<int> row_indices;
     std::vector<std::uint8_t> r_values;
     std::vector<std::uint16_t> depth_values;
+    float imu_gyro_x = 0.0f;
+    float imu_gyro_y = 0.0f;
+    float imu_gyro_z = 0.0f;
     std::string error_detail;
 };
 

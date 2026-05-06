@@ -44,7 +44,7 @@ def summarize_fused_detail(detail: str, print_full: bool) -> None:
         return
 
     # Example detail after ACK sanitizing:
-    # action_sent|d435i_ok|SL_12_ctrl=1_..._rows=64_samples=640_row_idx=0,8,..._rd=1:807,65:999,...
+    # action_sent|d435i_ok|SL_12_ctrl=1_..._IMU_gyro=0.0100,0.0200,0.0300_rows=64_samples=640_r=1,65,..._depth=807,999,...
     try:
         _, slam = detail.split("d435i_ok|", 1)
     except ValueError:
@@ -52,24 +52,25 @@ def summarize_fused_detail(detail: str, print_full: bool) -> None:
 
     tokens = slam.split("_")
     kv = {}
-    rd = ""
     for token in tokens:
-        if token.startswith("rd="):
-            rd = token[3:]
-        elif "=" in token:
-            key, value = token.split("=", 1)
-            kv[key] = value
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        kv[key] = value
 
     rows = kv.get("rows", "?")
     samples = kv.get("samples", "?")
-    row_idx = kv.get("idx", kv.get("row_idx", ""))
-    rd_pairs = [x for x in rd.split(",") if x]
+    imu = kv.get("gyro", "")  # token comes from IMU_gyro after '_' splitting
+    r_values = [x for x in kv.get("r", "").split(",") if x]
+    depth_values = [x for x in kv.get("depth", "").split(",") if x]
 
-    print(f"[FUSED] rows={rows} samples={samples} rd_pairs={len(rd_pairs)}")
-    if row_idx:
-        print(f"[FUSED] row_idx={row_idx}")
-    if rd_pairs:
-        print(f"[FUSED] first_rd_pairs={','.join(rd_pairs[:16])}")
+    print(f"[FUSED] rows={rows} samples={samples} r_count={len(r_values)} depth_count={len(depth_values)}")
+    if imu:
+        print(f"[IMU] gyro_xyz={imu}")
+    if r_values:
+        print(f"[COLOR_R] first_values={','.join(r_values[:16])}")
+    if depth_values:
+        print(f"[DEPTH] first_values={','.join(depth_values[:16])}")
     if print_full:
         print(f"[FUSED-DETAIL] {detail}")
 
@@ -165,7 +166,7 @@ def build_parser():
     parser.add_argument("--port", type=int, default=19520)
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--route-timeout-ms", type=int, default=8000)
-    parser.add_argument("--actions", default="F,L,R,S", help="Comma separated actions for non-interactive mode")
+    parser.add_argument("--actions", default="", help="Comma separated actions for non-interactive mode; if omitted, Windows uses WASD interactive mode")
     parser.add_argument("--interactive", action="store_true", help="Use WASD keyboard loop on Windows")
     parser.add_argument("--print-full-detail", action="store_true", help="Print full fused ACK detail")
 
@@ -201,9 +202,10 @@ def main() -> int:
             print("[ERROR] C START failed; aborting RT flow")
             return 2
 
-        if args.interactive:
+        use_interactive = args.interactive or not args.actions
+        if use_interactive:
             if msvcrt is None:
-                print("[ERROR] --interactive requires Windows msvcrt")
+                print("[ERROR] interactive mode requires Windows msvcrt; pass --actions F,L,R,S for non-interactive mode")
                 return 2
             print("[READY] W=F A=L D=R S=Stop Q=C_STOP+quit")
             while True:

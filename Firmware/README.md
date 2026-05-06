@@ -93,7 +93,7 @@ For a full client flow (`C START` -> realtime actions -> `C STOP`) that requests
 python tools/usv_tcp_full_flow_client.py --host <gateway-ip> --interactive --print-full-detail
 ```
 
-The client exposes C START sampling parameters such as `--max-rows`, `--sample-stride`, and `--channel-mode`; defaults are `--max-rows 64 --sample-stride 64 --channel-mode R`.
+The client exposes C START sampling parameters such as `--max-rows`, `--sample-stride`, and `--channel-mode`; defaults are `--max-rows 64 --sample-stride 64 --channel-mode R`. Realtime ACK details return color and depth as separate lists (`r=...` and `depth=...`) and mark IMU data with the `IMU_gyro=` header. Running the client without `--actions` uses WASD interactive mode on Windows and only exits when `Q` is pressed.
 
 ### D435i self-test and smoke test
 
@@ -183,7 +183,7 @@ R <seq> <tx_ms> <F|L|R|S>
 - Requires active session started by `C START`.
 - Legacy alias `RT` is accepted by the gateway while `legacy_alias=on` and normalized to `R`.
 - Realtime commands keep FLRS semantics: `F` forward, `L` turn-left, `R` turn-right, `S` runtime stop.
-- After a realtime action is accepted and sent to the downlink, the processor automatically captures/processes one D435i-backed SLAM sample and appends that result to the same `rt_apply` ACK detail as `action_sent|d435i_ok|SL_...`; if capture/processing fails, the action ACK remains `OK` but the detail becomes `action_sent|d435i_err=<reason>`.
+- After a realtime action is accepted and sent to the downlink, the processor automatically captures/processes one D435i-backed SLAM sample and appends that result to the same `rt_apply` ACK detail as `action_sent|d435i_ok|SL_...`; fused D435i details expose color/depth as separate `r=` and `depth=` lists and IMU data under `IMU_gyro=`. If capture/processing fails, the action ACK remains `OK` but the detail becomes `action_sent|d435i_err=<reason>`.
 - `C STOP` remains a session stop command and is separate from realtime `S`.
 
 ### 2) SLAM image ingest frame
@@ -234,7 +234,7 @@ Gateway ACK format after forwarding or gateway-local management/error handling:
 ACK <OK|ERR> seq=<n> up_ms=<n> down_ms=<n> tag=<code> detail=<code_or_payload> gw_trace=<id> gw_route=<result>
 ```
 
-- Processor `tag` examples: `cfg_start`, `rt_apply`, `sli_ok`, `sli_fail`, `slam_row_ok`, `slam_row_fail`. For `rt_apply`, `detail` includes both the action result and the automatically fused D435i/SLAM result, for example `action_sent|d435i_ok|SL_<seq>_ctrl=...`.
+- Processor `tag` examples: `cfg_start`, `rt_apply`, `sli_ok`, `sli_fail`, `slam_row_ok`, `slam_row_fail`. For `rt_apply`, `detail` includes both the action result and the automatically fused D435i/SLAM result, for example `action_sent|d435i_ok|SL_<seq>_ctrl=..._IMU_gyro=..._r=..._depth=...`.
 - Gateway `tag` examples: `gw_bad_msg`, `gw_route_timeout`, `gw_switch`, `gw_rollback`.
 - `up_ms` is computed from the command transmit timestamp when possible; otherwise it can be `0`.
 - `down_ms` is local processing/downlink time measured by the processor or parsed from processor ACK by the gateway.

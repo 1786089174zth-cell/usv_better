@@ -117,6 +117,9 @@ struct SlamOutput {
     std::vector<int> row_indices;
     std::vector<std::uint8_t> r_values;
     std::vector<std::uint16_t> depth_values;
+    float imu_gyro_x = 0.0f;
+    float imu_gyro_y = 0.0f;
+    float imu_gyro_z = 0.0f;
     int quality_score = 0;
     std::uint32_t proc_ms = 0;
     std::uint64_t source_ts = 0;
@@ -173,6 +176,9 @@ struct ExecutorResult {
     std::vector<int> row_indices;
     std::vector<std::uint8_t> r_values;
     std::vector<std::uint16_t> depth_values;
+    float imu_gyro_x = 0.0f;
+    float imu_gyro_y = 0.0f;
+    float imu_gyro_z = 0.0f;
     std::string error_detail;
 };
 
@@ -329,6 +335,9 @@ private:
         out.row_indices = in.row_indices;
         out.r_values = in.r_values;
         out.depth_values = in.depth_values;
+        out.imu_gyro_x = in.imu_gyro_x;
+        out.imu_gyro_y = in.imu_gyro_y;
+        out.imu_gyro_z = in.imu_gyro_z;
         out.error_detail = in.error_detail;
         return out;
     }
@@ -364,22 +373,25 @@ public:
         for (const std::uint32_t g : output.groups) {
             oss << " 0x" << std::hex << std::uppercase << g << std::dec;
         }
+        oss << " IMU_gyro=" << std::fixed << std::setprecision(4)
+            << output.imu_gyro_x << ',' << output.imu_gyro_y << ',' << output.imu_gyro_z
+            << std::defaultfloat;
         if (!output.depth_values.empty() && output.depth_values.size() == output.r_values.size()) {
             oss << " rows=" << output.row_indices.size()
                 << " samples=" << output.depth_values.size()
-                << " row_idx=";
-            for (std::size_t i = 0; i < output.row_indices.size(); ++i) {
+                << " r=";
+            for (std::size_t i = 0; i < output.r_values.size(); ++i) {
                 if (i > 0) {
                     oss << ',';
                 }
-                oss << output.row_indices[i];
+                oss << static_cast<int>(output.r_values[i]);
             }
-            oss << " rd=";
+            oss << " depth=";
             for (std::size_t i = 0; i < output.depth_values.size(); ++i) {
                 if (i > 0) {
                     oss << ',';
                 }
-                oss << static_cast<int>(output.r_values[i]) << ':' << output.depth_values[i];
+                oss << output.depth_values[i];
             }
         }
         return oss.str();
@@ -1018,6 +1030,9 @@ private:
         output.row_indices = result.row_indices;
         output.r_values = result.r_values;
         output.depth_values = result.depth_values;
+        output.imu_gyro_x = result.imu_gyro_x;
+        output.imu_gyro_y = result.imu_gyro_y;
+        output.imu_gyro_z = result.imu_gyro_z;
         output.source_ts = cmd.tx_ms;
         output.slam_status = SlamStatus::Normal;
 

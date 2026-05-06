@@ -439,6 +439,9 @@ struct SlamExecutionLayerClient::Impl {
             : static_cast<std::uint32_t>(feature_bytes.size());
         result.row_indices = live_sample.row_indices;
         result.depth_values = live_sample.depth_row;
+        result.imu_gyro_x = live_sample.gyro_x;
+        result.imu_gyro_y = live_sample.gyro_y;
+        result.imu_gyro_z = live_sample.gyro_z;
         result.r_values.clear();
         result.r_values.reserve(live_sample.rgb_row.size() / 3u);
         for (std::size_t i = 0; i + 2u < live_sample.rgb_row.size(); i += 3u) {
