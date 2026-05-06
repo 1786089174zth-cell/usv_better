@@ -149,6 +149,7 @@ struct SessionState {
     std::uint64_t last_sli_rx_ms = 0;
     bool has_last_sli = false;
     SlamFusionState slam_fusion;
+    std::uint32_t auto_d435i_frame_id = 0;
 };
 
 struct RuntimeMetrics {
@@ -946,17 +947,66 @@ private:
 
         const std::uint64_t t0 = nowMs();
         const bool ok = downlink_.sendAction(cmd.action, session_.control_cfg);
-        const std::uint64_t down_ms = nowMs() - t0;
         session_.last_rt_rx_ms = rx_ms;
         session_.has_last_rt = true;
 
         if (ok) {
+            const std::string fused_detail = buildRealtimeD435iDetail(cmd);
+            const std::uint64_t down_ms = nowMs() - t0;
             return emitAck(true, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                       "rt_apply", "action_sent");
+                       "rt_apply", fused_detail);
         } else {
+            const std::uint64_t down_ms = nowMs() - t0;
             return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
                        "rt_fail", "downlink_error");
         }
+    }
+
+    SlamImageFrame buildRealtimeD435iFrame(const ParsedCommand& cmd) {
+        SlamImageFrame frame;
+        frame.seq = cmd.seq;
+        frame.tx_ms = cmd.tx_ms;
+        frame.frame_id = ++session_.auto_d435i_frame_id;
+        frame.width = 640;
+        frame.height = 480;
+        frame.pixel_fmt = "RGB24";
+        frame.keyframe = false;
+        frame.quality_hint = 60;
+        frame.payload_ref = "rt_auto_d435i";
+        return frame;
+    }
+
+    std::string buildRealtimeD435iDetail(const ParsedCommand& cmd) {
+        const SlamImageFrame frame = buildRealtimeD435iFrame(cmd);
+        const ExecutorResult result = slam_executor_.ProcessFrame(
+            session_.session_id,
+            frame,
+            static_cast<std::uint32_t>(session_.slam_cfg.exec_timeout_ms));
+
+        SlamOutput output;
+        output.control_state = session_.active ? 1 : 0;
+        output.proc_ms = result.proc_ms;
+        output.quality_score = result.quality_score;
+        output.groups = result.groups;
+        output.source_ts = cmd.tx_ms;
+        output.slam_status = SlamStatus::Normal;
+
+        if (!result.ok) {
+            const bool timed_out = result.timeout || result.error_detail.find("timeout") != std::string::npos ||
+                                   result.error_detail.find("didn't arrive within") != std::string::npos;
+            output.slam_status = timed_out ? SlamStatus::ExecutorTimeout : SlamStatus::ExecutorError;
+            if (timed_out) {
+                metrics_.executor_timeout += 1;
+            }
+            updateSlamFusionState(cmd, output);
+            const std::string detail = result.error_detail.empty()
+                ? (timed_out ? "executor_timeout" : "executor_error")
+                : result.error_detail;
+            return std::string("action_sent|d435i_err=") + detail;
+        }
+
+        updateSlamFusionState(cmd, output);
+        return std::string("action_sent|d435i_ok|") + downlink_.buildSlamFrame(cmd.seq, output);
     }
 
     std::string onSlamImageInput(const ParsedCommand& cmd, std::uint64_t rx_ms) {
