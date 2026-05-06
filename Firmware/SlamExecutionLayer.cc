@@ -12,6 +12,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -283,9 +284,12 @@ public:
             out->depth_row.push_back(depth);
         }
 
-        out->gyro_x = 0.01f * static_cast<float>((capture_seq_ % 20u) - 10u);
-        out->gyro_y = 0.02f * static_cast<float>((capture_seq_ % 16u) - 8u);
-        out->gyro_z = 0.03f * static_cast<float>((capture_seq_ % 12u) - 6u);
+        const int gyro_phase_x = static_cast<int>(capture_seq_ % 20u) - 10;
+        const int gyro_phase_y = static_cast<int>(capture_seq_ % 16u) - 8;
+        const int gyro_phase_z = static_cast<int>(capture_seq_ % 12u) - 6;
+        out->gyro_x = 0.01f * static_cast<float>(gyro_phase_x);
+        out->gyro_y = 0.02f * static_cast<float>(gyro_phase_y);
+        out->gyro_z = 0.03f * static_cast<float>(gyro_phase_z);
         return true;
     }
 
@@ -308,6 +312,7 @@ struct SlamExecutionLayerClient::Impl {
     bool transport_connected = false;
     bool d435i_ready = false;
     bool use_mock_d435i = false;
+    std::string last_runtime_error;
     D435iCaptureBridge d435i_bridge;
     MockD435iCaptureBridge mock_d435i_bridge;
 
@@ -327,10 +332,22 @@ struct SlamExecutionLayerClient::Impl {
         slam_cfg = cfg;
         active = true;
         std::string capture_error;
-        d435i_ready = use_mock_d435i
-            ? mock_d435i_bridge.ensureStarted(&capture_error)
-            : d435i_bridge.ensureStarted(&capture_error);
-        return true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        do {
+            d435i_ready = use_mock_d435i
+                ? mock_d435i_bridge.ensureStarted(&capture_error)
+                : d435i_bridge.ensureStarted(&capture_error);
+            if (d435i_ready) {
+                last_runtime_error.clear();
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        } while (std::chrono::steady_clock::now() < deadline);
+
+        active = false;
+        last_runtime_error = capture_error.empty() ? "d435i_start_timeout_30s" : capture_error;
+        std::cerr << "PushConfig failed: " << last_runtime_error << std::endl;
+        return false;
     }
 
     ExecutorResult processFrame(std::uint32_t in_session_id,
@@ -374,6 +391,8 @@ struct SlamExecutionLayerClient::Impl {
             result.ok = false;
             result.timeout = false;
             result.quality_score = 0;
+            last_runtime_error = capture_error.empty() ? "capture_failed_unknown" : capture_error;
+            std::cerr << "ProcessFrame capture failed: " << last_runtime_error << std::endl;
             return result;
         }
 
@@ -441,11 +460,19 @@ struct SlamExecutionLayerClient::Impl {
         d435i_bridge.shutdown();
         mock_d435i_bridge.shutdown();
         d435i_ready = false;
+        last_runtime_error.clear();
         return true;
     }
 
     bool getHealth() const {
-        return transport_connected && (!active || d435i_ready || use_mock_d435i || !d435i_bridge.started());
+        if (!transport_connected) {
+            return false;
+        }
+        if (!active) {
+            return true;
+        }
+        const bool bridge_started = use_mock_d435i ? mock_d435i_bridge.started() : d435i_bridge.started();
+        return d435i_ready && bridge_started;
     }
 };
 

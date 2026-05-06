@@ -164,10 +164,10 @@ SL <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12> 
 The processor also accepts already-enriched row-feature `SLI` frames:
 
 ```text
-SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=ROW1 keyframe=<0|1> quality_hint=<0..100> payload_ref=<id> feature=row row_index=<n> channel_mode=<R|G|B|GRAY> stride=<n> sample_count=<n> payload_len=<n> payload_crc32=<n>
+SR <seq> <tx_ms> frame_id=<n> width=<w> height=<h> payload_ref=<id> keyframe=<0|1> quality_hint=<0..100>
 ```
-
-Required row metadata fields are `feature=row`, `row_index`, `channel_mode`, `stride`, `sample_count`, `payload_len`, and `payload_crc32`.
+- Used by gateway Step3 path to fetch RGB frame from adapter, extract one row, and re-upload as `SLI feature=row ...`.
+- This path requires an explicit frame source from adapter/integration; there is no automatic fallback to mock input.
 
 ### 4) Config long frame
 
