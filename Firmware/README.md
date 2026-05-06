@@ -81,6 +81,20 @@ Start the processor first, then the gateway:
 
 Connect clients to the gateway at `127.0.0.1:19520` and send newline-delimited frames. `C START` must succeed before realtime `R` commands are accepted.
 
+For a one-command local build/start workflow, run:
+
+```bash
+bash tools/run_tcp_stack.sh
+```
+
+For a full client flow (`C START` -> realtime actions -> `C STOP`) that requests 64 interval-picked D435i rows with R/depth pairs by default, run from a client machine:
+
+```bash
+python tools/usv_tcp_full_flow_client.py --host <gateway-ip> --interactive --print-full-detail
+```
+
+The client exposes C START sampling parameters such as `--max-rows`, `--sample-stride`, and `--channel-mode`; defaults are `--max-rows 64 --sample-stride 64 --channel-mode R`.
+
 ### D435i self-test and smoke test
 
 Processor self-test:
@@ -196,7 +210,7 @@ SR <seq> <tx_ms> frame_id=<n> width=<w> height=<h> payload_ref=<id> keyframe=<0|
 ### 4) Config long frame
 
 ```text
-C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest> row_ratio=<0..1> channel_mode=<R|G|B|GRAY> sample_stride=<1..64> max_rows=<1..8> pack_mode=<bin|hex>
+C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest> row_ratio=<0..1> channel_mode=<R|G|B|GRAY> sample_stride=<1..64> max_rows=<1..64> pack_mode=<bin|hex>
 C STOP seq=<n> ts=<ms>
 ```
 

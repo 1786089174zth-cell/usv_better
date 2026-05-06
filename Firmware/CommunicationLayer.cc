@@ -158,7 +158,7 @@ public:
     }
 
 private:
-    static constexpr std::size_t kMaxProcessorAckBytes = 16384;
+    static constexpr std::size_t kMaxProcessorAckBytes = 262144;
 
     std::string host_;
     std::uint16_t port_ = kDefaultProcessorPort;

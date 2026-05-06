@@ -39,6 +39,32 @@ int clampRowIndex(float row_ratio, int height) {
     return std::clamp(row_index, 0, height - 1);
 }
 
+
+std::vector<int> selectRowIndices(const SlamConfig& slam_cfg, int height) {
+    std::vector<int> rows;
+    if (height <= 0) {
+        rows.push_back(0);
+        return rows;
+    }
+
+    const int requested_rows = std::max(1, slam_cfg.max_rows);
+    const int row_count = std::clamp(requested_rows, 1, height);
+    rows.reserve(static_cast<std::size_t>(row_count));
+    if (row_count == 1) {
+        rows.push_back(clampRowIndex(slam_cfg.row_ratio, height));
+        return rows;
+    }
+
+    for (int i = 0; i < row_count; ++i) {
+        const double ratio = static_cast<double>(i) / static_cast<double>(row_count - 1);
+        const int row = static_cast<int>(std::lround(ratio * static_cast<double>(height - 1)));
+        if (rows.empty() || rows.back() != row) {
+            rows.push_back(std::clamp(row, 0, height - 1));
+        }
+    }
+    return rows;
+}
+
 std::string channelModeToString(RowChannelMode mode) {
     switch (mode) {
         case RowChannelMode::R:
@@ -157,13 +183,14 @@ public:
                 return false;
             }
 
-            const int row_index = clampRowIndex(slam_cfg.row_ratio, color_height);
+            const std::vector<int> row_indices = selectRowIndices(slam_cfg, color_height);
             const int stride = std::max(1, slam_cfg.sample_stride);
             const auto* color_bytes = reinterpret_cast<const std::uint8_t*>(color.get_data());
             const auto* depth_words = reinterpret_cast<const std::uint16_t*>(depth.get_data());
             const int color_stride_bytes = color.get_stride_in_bytes();
             const int depth_stride_words = depth.get_stride_in_bytes() / static_cast<int>(sizeof(std::uint16_t));
             const int sample_limit = std::min(color_width, depth_width);
+            const std::size_t samples_per_row = static_cast<std::size_t>((sample_limit + stride - 1) / stride);
 
             out->valid = true;
             out->capture_ts_ms = static_cast<std::uint64_t>(
@@ -174,26 +201,29 @@ public:
             out->color_height = static_cast<std::uint32_t>(color_height);
             out->depth_width = static_cast<std::uint32_t>(depth_width);
             out->depth_height = static_cast<std::uint32_t>(depth_height);
-            out->row_index = row_index;
+            out->row_index = row_indices.empty() ? 0 : row_indices.front();
+            out->row_indices = row_indices;
             out->rgb_row.clear();
             out->depth_row.clear();
-            out->rgb_row.reserve(static_cast<std::size_t>((sample_limit + stride - 1) / stride) * 3);
-            out->depth_row.reserve(static_cast<std::size_t>((sample_limit + stride - 1) / stride));
+            out->rgb_row.reserve(row_indices.size() * samples_per_row * 3u);
+            out->depth_row.reserve(row_indices.size() * samples_per_row);
             out->gyro_x = last_gyro_x_;
             out->gyro_y = last_gyro_y_;
             out->gyro_z = last_gyro_z_;
 
-            for (int x = 0; x < sample_limit; x += stride) {
-                const int color_offset = row_index * color_stride_bytes + x * 3;
-                const std::uint8_t b = color_bytes[color_offset + 0];
-                const std::uint8_t g = color_bytes[color_offset + 1];
-                const std::uint8_t r = color_bytes[color_offset + 2];
-                out->rgb_row.push_back(r);
-                out->rgb_row.push_back(g);
-                out->rgb_row.push_back(b);
+            for (const int row_index : row_indices) {
+                for (int x = 0; x < sample_limit; x += stride) {
+                    const int color_offset = row_index * color_stride_bytes + x * 3;
+                    const std::uint8_t b = color_bytes[color_offset + 0];
+                    const std::uint8_t g = color_bytes[color_offset + 1];
+                    const std::uint8_t r = color_bytes[color_offset + 2];
+                    out->rgb_row.push_back(r);
+                    out->rgb_row.push_back(g);
+                    out->rgb_row.push_back(b);
 
-                const int depth_offset = row_index * depth_stride_words + x;
-                out->depth_row.push_back(depth_words[depth_offset]);
+                    const int depth_offset = row_index * depth_stride_words + x;
+                    out->depth_row.push_back(depth_words[depth_offset]);
+                }
             }
 
             return true;
@@ -252,7 +282,7 @@ public:
         }
         constexpr int kWidth = 640;
         constexpr int kHeight = 480;
-        const int row_index = clampRowIndex(slam_cfg.row_ratio, kHeight);
+        const std::vector<int> row_indices = selectRowIndices(slam_cfg, kHeight);
         const int stride = std::max(1, slam_cfg.sample_stride);
 
         out->valid = true;
@@ -264,24 +294,28 @@ public:
         out->color_height = kHeight;
         out->depth_width = kWidth;
         out->depth_height = kHeight;
-        out->row_index = row_index;
+        out->row_index = row_indices.empty() ? 0 : row_indices.front();
+        out->row_indices = row_indices;
         out->rgb_row.clear();
         out->depth_row.clear();
 
         const int sample_limit = kWidth;
-        out->rgb_row.reserve(static_cast<std::size_t>((sample_limit + stride - 1) / stride) * 3);
-        out->depth_row.reserve(static_cast<std::size_t>((sample_limit + stride - 1) / stride));
-        for (int x = 0; x < sample_limit; x += stride) {
-            const std::uint8_t r = static_cast<std::uint8_t>((x + static_cast<int>(capture_seq_)) & 0xFF);
-            const std::uint8_t g = static_cast<std::uint8_t>((row_index + static_cast<int>(capture_seq_ * 3u)) & 0xFF);
-            const std::uint8_t b = static_cast<std::uint8_t>((x + row_index + static_cast<int>(capture_seq_ * 5u)) & 0xFF);
-            out->rgb_row.push_back(r);
-            out->rgb_row.push_back(g);
-            out->rgb_row.push_back(b);
+        const std::size_t samples_per_row = static_cast<std::size_t>((sample_limit + stride - 1) / stride);
+        out->rgb_row.reserve(row_indices.size() * samples_per_row * 3u);
+        out->depth_row.reserve(row_indices.size() * samples_per_row);
+        for (const int row_index : row_indices) {
+            for (int x = 0; x < sample_limit; x += stride) {
+                const std::uint8_t r = static_cast<std::uint8_t>((x + row_index + static_cast<int>(capture_seq_)) & 0xFF);
+                const std::uint8_t g = static_cast<std::uint8_t>((row_index + static_cast<int>(capture_seq_ * 3u)) & 0xFF);
+                const std::uint8_t b = static_cast<std::uint8_t>((x + row_index + static_cast<int>(capture_seq_ * 5u)) & 0xFF);
+                out->rgb_row.push_back(r);
+                out->rgb_row.push_back(g);
+                out->rgb_row.push_back(b);
 
-            const std::uint16_t depth = static_cast<std::uint16_t>(
-                800u + ((static_cast<std::uint32_t>(x) * 3u + capture_seq_ * 7u) % 2200u));
-            out->depth_row.push_back(depth);
+                const std::uint16_t depth = static_cast<std::uint16_t>(
+                    800u + ((static_cast<std::uint32_t>(x + row_index) * 3u + capture_seq_ * 7u) % 2200u));
+                out->depth_row.push_back(depth);
+            }
         }
 
         const int gyro_phase_x = static_cast<int>(capture_seq_ % 20u) - 10;
@@ -403,6 +437,13 @@ struct SlamExecutionLayerClient::Impl {
         const std::uint32_t sample_count = have_live_sample
             ? static_cast<std::uint32_t>(live_sample.rgb_row.size() / 3u)
             : static_cast<std::uint32_t>(feature_bytes.size());
+        result.row_indices = live_sample.row_indices;
+        result.depth_values = live_sample.depth_row;
+        result.r_values.clear();
+        result.r_values.reserve(live_sample.rgb_row.size() / 3u);
+        for (std::size_t i = 0; i + 2u < live_sample.rgb_row.size(); i += 3u) {
+            result.r_values.push_back(live_sample.rgb_row[i]);
+        }
 
         SlamImageFrame enriched = frame;
         enriched.is_row_feature = true;

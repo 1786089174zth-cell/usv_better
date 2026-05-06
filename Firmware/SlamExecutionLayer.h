@@ -65,6 +65,9 @@ struct ExecutorResult {
     int quality_score = 0;
     std::uint32_t proc_ms = 0;
     std::vector<std::uint32_t> groups;
+    std::vector<int> row_indices;
+    std::vector<std::uint8_t> r_values;
+    std::vector<std::uint16_t> depth_values;
     std::string error_detail;
 };
 
@@ -77,6 +80,7 @@ struct D435iFrameSample {
     std::uint32_t depth_width = 0;
     std::uint32_t depth_height = 0;
     int row_index = -1;
+    std::vector<int> row_indices;
     std::vector<std::uint8_t> rgb_row;
     std::vector<std::uint16_t> depth_row;
     float gyro_x = 0.0f;

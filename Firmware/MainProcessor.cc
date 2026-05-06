@@ -114,6 +114,9 @@ struct SlamOutput {
     std::uint8_t control_state = 0;
     SlamStatus slam_status = SlamStatus::Normal;
     std::vector<std::uint32_t> groups;
+    std::vector<int> row_indices;
+    std::vector<std::uint8_t> r_values;
+    std::vector<std::uint16_t> depth_values;
     int quality_score = 0;
     std::uint32_t proc_ms = 0;
     std::uint64_t source_ts = 0;
@@ -167,6 +170,9 @@ struct ExecutorResult {
     int quality_score = 0;
     std::uint32_t proc_ms = 0;
     std::vector<std::uint32_t> groups;
+    std::vector<int> row_indices;
+    std::vector<std::uint8_t> r_values;
+    std::vector<std::uint16_t> depth_values;
     std::string error_detail;
 };
 
@@ -320,6 +326,9 @@ private:
         out.quality_score = in.quality_score;
         out.proc_ms = in.proc_ms;
         out.groups = in.groups;
+        out.row_indices = in.row_indices;
+        out.r_values = in.r_values;
+        out.depth_values = in.depth_values;
         out.error_detail = in.error_detail;
         return out;
     }
@@ -354,6 +363,24 @@ public:
             << " groups=" << output.groups.size();
         for (const std::uint32_t g : output.groups) {
             oss << " 0x" << std::hex << std::uppercase << g << std::dec;
+        }
+        if (!output.depth_values.empty() && output.depth_values.size() == output.r_values.size()) {
+            oss << " rows=" << output.row_indices.size()
+                << " samples=" << output.depth_values.size()
+                << " row_idx=";
+            for (std::size_t i = 0; i < output.row_indices.size(); ++i) {
+                if (i > 0) {
+                    oss << ',';
+                }
+                oss << output.row_indices[i];
+            }
+            oss << " rd=";
+            for (std::size_t i = 0; i < output.depth_values.size(); ++i) {
+                if (i > 0) {
+                    oss << ',';
+                }
+                oss << static_cast<int>(output.r_values[i]) << ':' << output.depth_values[i];
+            }
         }
         return oss.str();
     }
@@ -988,6 +1015,9 @@ private:
         output.proc_ms = result.proc_ms;
         output.quality_score = result.quality_score;
         output.groups = result.groups;
+        output.row_indices = result.row_indices;
+        output.r_values = result.r_values;
+        output.depth_values = result.depth_values;
         output.source_ts = cmd.tx_ms;
         output.slam_status = SlamStatus::Normal;
 
@@ -1059,6 +1089,9 @@ private:
         output.proc_ms = result.proc_ms;
         output.quality_score = result.quality_score;
         output.groups = result.groups;
+        output.row_indices = result.row_indices;
+        output.r_values = result.r_values;
+        output.depth_values = result.depth_values;
         output.slam_status = SlamStatus::Normal;
 
         if (!result.ok) {
@@ -1265,7 +1298,7 @@ private:
     static constexpr int kSlamHardMaxTimeoutMs = 200;
     static constexpr int kSlamHardMaxGroups = 64;
     static constexpr int kSlamHardMaxStride = 64;
-    static constexpr int kSlamHardMaxRows = 8;
+    static constexpr int kSlamHardMaxRows = 64;
     static constexpr std::uint64_t kRtPriorityWindowMs = 20;
     static constexpr std::size_t kAckSamplesWindow = 256;
 
@@ -1423,7 +1456,7 @@ void printUsage() {
               << "TCP processor backend:\n"
               << "  --tcp [--port 19521] [--mock-d435i]\n"
               << "Config start:\n"
-              << "  C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest>\n"
+              << "  C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest> row_ratio=<0..1> channel_mode=<R|G|B|GRAY> sample_stride=<1..64> max_rows=<1..64> pack_mode=<bin|hex>\n"
               << "Realtime:\n"
               << "  R <seq> <tx_ms> <F|L|R>\n"
               << "SLAM image input:\n"
