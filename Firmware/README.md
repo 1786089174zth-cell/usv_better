@@ -93,7 +93,7 @@ For a full client flow (`C START` -> realtime actions -> `C STOP`) that requests
 python tools/usv_tcp_full_flow_client.py --host <gateway-ip> --interactive --print-full-detail
 ```
 
-The client exposes C START sampling parameters such as `--max-rows`, `--sample-stride`, and `--channel-mode`; defaults are `--max-rows 64 --sample-stride 64 --channel-mode R`. Realtime ACK details return color and depth as separate lists (`r=...` and `depth=...`) and mark IMU data with the `IMU_gyro=` header. Running the client without `--actions` uses WASD interactive mode on Windows and only exits when `Q` is pressed.
+The client exposes C START sampling parameters such as `--max-rows`, `--sample-stride`, and `--channel-mode`; defaults are `--max-rows 64 --sample-stride 64 --channel-mode R`. Realtime ACK details return color and depth as separate lists (`r=...` and `depth=...`) and mark IMU data with the `IMU_gyro=` header. Each capture resets the output sample before filling it and drains queued RealSense frames to use the latest frame available. Running the client without `--actions` uses WASD interactive mode on Windows and only exits when `Q` is pressed.
 
 ### D435i self-test and smoke test
 

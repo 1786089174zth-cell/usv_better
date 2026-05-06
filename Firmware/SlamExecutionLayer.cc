@@ -143,13 +143,24 @@ public:
         if (out == nullptr) {
             return false;
         }
+        *out = D435iFrameSample{};
+        if (error != nullptr) {
+            error->clear();
+        }
 
         if (!ensureStarted(error)) {
             return false;
         }
 
         try {
-            rs2::frameset frames = pipeline_.wait_for_frames(timeout_ms);
+            rs2::frameset frames;
+            if (!pipeline_.poll_for_frames(&frames)) {
+                frames = pipeline_.wait_for_frames(timeout_ms);
+            }
+            rs2::frameset newer_frames;
+            while (pipeline_.poll_for_frames(&newer_frames)) {
+                frames = newer_frames;
+            }
             if (align_to_color_ == nullptr) {
                 align_to_color_ = std::make_unique<rs2::align>(RS2_STREAM_COLOR);
             }
@@ -273,9 +284,12 @@ public:
                  D435iFrameSample* out,
                  std::string* error) {
         (void)timeout_ms;
-        (void)error;
         if (out == nullptr) {
             return false;
+        }
+        *out = D435iFrameSample{};
+        if (error != nullptr) {
+            error->clear();
         }
         if (!started_) {
             started_ = true;
@@ -305,25 +319,22 @@ public:
         out->depth_row.reserve(row_indices.size() * samples_per_row);
         for (const int row_index : row_indices) {
             for (int x = 0; x < sample_limit; x += stride) {
-                const std::uint8_t r = static_cast<std::uint8_t>((x + row_index + static_cast<int>(capture_seq_)) & 0xFF);
-                const std::uint8_t g = static_cast<std::uint8_t>((row_index + static_cast<int>(capture_seq_ * 3u)) & 0xFF);
-                const std::uint8_t b = static_cast<std::uint8_t>((x + row_index + static_cast<int>(capture_seq_ * 5u)) & 0xFF);
+                const std::uint8_t r = static_cast<std::uint8_t>((x + row_index) & 0xFF);
+                const std::uint8_t g = static_cast<std::uint8_t>(row_index & 0xFF);
+                const std::uint8_t b = static_cast<std::uint8_t>((x + row_index) & 0xFF);
                 out->rgb_row.push_back(r);
                 out->rgb_row.push_back(g);
                 out->rgb_row.push_back(b);
 
                 const std::uint16_t depth = static_cast<std::uint16_t>(
-                    800u + ((static_cast<std::uint32_t>(x + row_index) * 3u + capture_seq_ * 7u) % 2200u));
+                    800u + ((static_cast<std::uint32_t>(x + row_index) * 3u) % 2200u));
                 out->depth_row.push_back(depth);
             }
         }
 
-        const int gyro_phase_x = static_cast<int>(capture_seq_ % 20u) - 10;
-        const int gyro_phase_y = static_cast<int>(capture_seq_ % 16u) - 8;
-        const int gyro_phase_z = static_cast<int>(capture_seq_ % 12u) - 6;
-        out->gyro_x = 0.01f * static_cast<float>(gyro_phase_x);
-        out->gyro_y = 0.02f * static_cast<float>(gyro_phase_y);
-        out->gyro_z = 0.03f * static_cast<float>(gyro_phase_z);
+        out->gyro_x = 0.01f;
+        out->gyro_y = 0.02f;
+        out->gyro_z = 0.03f;
         return true;
     }
 
