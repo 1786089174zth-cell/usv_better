@@ -1,20 +1,30 @@
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <cctype>
+#include <cstring>
 #include <deque>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <netinet/in.h>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
 #include <utility>
+#include <unistd.h>
 #include <vector>
 
 #include "SlamExecutionLayer.h"
 
+#include <arpa/inet.h>
+
 namespace {
+
+constexpr std::uint16_t kDefaultProcessorListenPort = 19521;
 
 enum class ActionType {
     Forward,
@@ -156,6 +166,7 @@ struct ExecutorResult {
     int quality_score = 0;
     std::uint32_t proc_ms = 0;
     std::vector<std::uint32_t> groups;
+    std::string error_detail;
 };
 
 class ISlamExecutorClient {
@@ -171,6 +182,7 @@ public:
     virtual bool StopSession(std::uint32_t session_id) = 0;
     virtual bool GetHealth() = 0;
     virtual bool InitializeD435i(std::string* error) = 0;
+    virtual void EnableMockD435i(bool enabled) = 0;
     virtual void ShutdownD435i() = 0;
     virtual bool CaptureD435iFrame(std::uint32_t timeout_ms,
                                    const SlamConfig& slam_cfg,
@@ -206,6 +218,10 @@ public:
 
     bool InitializeD435i(std::string* error) override {
         return bridge_.InitializeD435i(error);
+    }
+
+    void EnableMockD435i(bool enabled) override {
+        bridge_.EnableMockD435i(enabled);
     }
 
     void ShutdownD435i() override {
@@ -303,6 +319,7 @@ private:
         out.quality_score = in.quality_score;
         out.proc_ms = in.proc_ms;
         out.groups = in.groups;
+        out.error_detail = in.error_detail;
         return out;
     }
 
@@ -812,14 +829,16 @@ ParsedCommand parseCommand(const std::string& line) {
 
 class MainProcessor {
 public:
-    explicit MainProcessor(ControlDownlink downlink)
-        : downlink_(std::move(downlink)) {}
+    explicit MainProcessor(ControlDownlink downlink, bool use_mock_d435i = false)
+        : downlink_(std::move(downlink)) {
+        slam_executor_.EnableMockD435i(use_mock_d435i);
+    }
 
     std::string onCommData(const std::string& payload) {
         const std::uint64_t rx_ms = nowMs();
         const ParsedCommand cmd = parseCommand(payload);
         if (cmd.type == CommandType::Invalid) {
-            return buildAck(false, 0, rx_ms, 0, 0, "bad_command", cmd.parse_error);
+            return emitAck(false, 0, rx_ms, 0, 0, "bad_command", cmd.parse_error);
         }
 
         if (cmd.type == CommandType::ConfigStart) {
@@ -964,48 +983,51 @@ private:
         }
 
         SlamOutput output;
-        const std::uint64_t t0 = nowMs();
-        slam_exec::D435iFrameSample capture_sample;
-        std::string capture_error;
-        const bool capture_ok = slam_executor_.CaptureD435iFrame(
-            static_cast<std::uint32_t>(session_.slam_cfg.exec_timeout_ms),
-            session_.slam_cfg,
-            &capture_sample,
-            &capture_error);
-        const std::uint64_t down_ms = nowMs() - t0;
-
         output.control_state = session_.active ? 1 : 0;
-        output.proc_ms = static_cast<int>(down_ms);
         output.source_ts = cmd.tx_ms;
-        output.quality_score = capture_ok ? 100 : 0;
         output.groups.clear();
 
-        if (!capture_ok) {
-            output.slam_status = SlamStatus::ExecutorError;
-            session_.slam_fusion.dropped_frames += 1;
-            metrics_.sli_drop += 1;
-            if (capture_error.find("didn't arrive within") != std::string::npos ||
-                capture_error.find("timeout") != std::string::npos) {
-                output.slam_status = SlamStatus::ExecutorTimeout;
-                metrics_.executor_timeout += 1;
-            }
-            updateSlamFusionState(cmd, output);
-            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
-                           fail_tag, capture_error.empty() ? "capture_error" : capture_error);
-        }
-
-        output.slam_status = SlamStatus::Normal;
-
-        // If realtime commands are very close, keep control latency priority and only return status.
+        // If realtime commands are very close, keep control latency priority and avoid entering
+        // the comparatively expensive D435i/executor path.
         if (session_.has_last_rt && rx_ms - session_.last_rt_rx_ms <= kRtPriorityWindowMs) {
             output.slam_status = SlamStatus::Overloaded;
-            output.groups.clear();
             updateSlamFusionState(cmd, output);
             session_.last_sli_rx_ms = rx_ms;
             session_.has_last_sli = true;
-            // Overload degradation: frame deferred due to RT priority
-            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+            // Overload degradation: frame deferred due to RT priority.
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, 0,
                            fail_tag, "overload_rt_priority");
+        }
+
+        const std::uint64_t t0 = nowMs();
+        const ExecutorResult result = slam_executor_.ProcessFrame(
+            session_.session_id,
+            cmd.frame,
+            static_cast<std::uint32_t>(session_.slam_cfg.exec_timeout_ms));
+        const std::uint64_t down_ms = nowMs() - t0;
+
+        output.proc_ms = result.proc_ms;
+        output.quality_score = result.quality_score;
+        output.groups = result.groups;
+        output.slam_status = SlamStatus::Normal;
+
+        if (!result.ok) {
+            const bool timed_out = result.timeout || result.error_detail.find("timeout") != std::string::npos ||
+                                   result.error_detail.find("didn't arrive within") != std::string::npos;
+            output.slam_status = timed_out ? SlamStatus::ExecutorTimeout : SlamStatus::ExecutorError;
+            session_.slam_fusion.dropped_frames += 1;
+            metrics_.sli_drop += 1;
+            if (timed_out) {
+                metrics_.executor_timeout += 1;
+            }
+            updateSlamFusionState(cmd, output);
+            session_.last_sli_rx_ms = rx_ms;
+            session_.has_last_sli = true;
+            const std::string detail = result.error_detail.empty()
+                ? (timed_out ? "executor_timeout" : "executor_error")
+                : result.error_detail;
+            return emitAck(false, cmd.seq, rx_ms, cmd.tx_ms, down_ms,
+                           fail_tag, detail);
         }
 
         const std::string slam_frame = downlink_.buildSlamFrame(cmd.seq, output);
@@ -1120,6 +1142,19 @@ private:
         return buildAck(ok, seq, rx_ms, tx_ms, down_ms, tag, detail);
     }
 
+    static std::string sanitizeAckValue(const std::string& value) {
+        std::string out;
+        out.reserve(value.size());
+        for (const unsigned char ch : value) {
+            if (std::isspace(ch) || std::iscntrl(ch)) {
+                out.push_back('_');
+            } else {
+                out.push_back(static_cast<char>(ch));
+            }
+        }
+        return out.empty() ? "none" : out;
+    }
+
     static std::string buildAck(bool ok,
                                 std::uint32_t seq,
                                 std::uint64_t rx_ms,
@@ -1133,8 +1168,8 @@ private:
             << " seq=" << seq
             << " up_ms=" << up_ms
             << " down_ms=" << down_ms
-            << " tag=" << tag
-            << " detail=" << detail;
+            << " tag=" << sanitizeAckValue(tag)
+            << " detail=" << sanitizeAckValue(detail);
         return oss.str();
     }
 
@@ -1190,10 +1225,153 @@ private:
     SlamExecutorBridgeClient slam_executor_;
 };
 
+bool sendAll(int fd, const std::string& payload) {
+    std::size_t offset = 0;
+    while (offset < payload.size()) {
+        const ssize_t written = ::send(fd, payload.data() + offset, payload.size() - offset, 0);
+        if (written > 0) {
+            offset += static_cast<std::size_t>(written);
+            continue;
+        }
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+int createListenSocket(std::uint16_t port, std::string* error) {
+    const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        if (error != nullptr) {
+            *error = std::string("socket_failed:") + std::strerror(errno);
+        }
+        return -1;
+    }
+
+    int reuse = 1;
+    if (::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+        if (error != nullptr) {
+            *error = std::string("setsockopt_failed:") + std::strerror(errno);
+        }
+        ::close(listen_fd);
+        return -1;
+    }
+
+    sockaddr_in addr {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+
+    if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        if (error != nullptr) {
+            *error = std::string("bind_failed:") + std::strerror(errno);
+        }
+        ::close(listen_fd);
+        return -1;
+    }
+
+    if (::listen(listen_fd, 8) < 0) {
+        if (error != nullptr) {
+            *error = std::string("listen_failed:") + std::strerror(errno);
+        }
+        ::close(listen_fd);
+        return -1;
+    }
+
+    return listen_fd;
+}
+
+std::string formatPeerAddress(const sockaddr_in& addr) {
+    char ip_buffer[INET_ADDRSTRLEN] = {};
+    const char* ip_text = ::inet_ntop(AF_INET, &addr.sin_addr, ip_buffer, sizeof(ip_buffer));
+    if (ip_text == nullptr) {
+        return "unknown";
+    }
+    std::ostringstream oss;
+    oss << ip_text << ':' << ntohs(addr.sin_port);
+    return oss.str();
+}
+
+bool handleProcessorTcpClient(int client_fd, MainProcessor* processor, const std::string& peer_label) {
+    std::cout << "Processor TCP client connected from " << peer_label << std::endl;
+
+    std::string buffer;
+    buffer.reserve(4096);
+    char chunk[4096];
+
+    while (true) {
+        const ssize_t received = ::recv(client_fd, chunk, sizeof(chunk), 0);
+        if (received > 0) {
+            buffer.append(chunk, static_cast<std::size_t>(received));
+            std::size_t newline_pos = std::string::npos;
+            while ((newline_pos = buffer.find('\n')) != std::string::npos) {
+                std::string line = buffer.substr(0, newline_pos);
+                buffer.erase(0, newline_pos + 1);
+                if (!line.empty() && line.back() == '\r') {
+                    line.pop_back();
+                }
+                if (line == "q" || line == "Q") {
+                    return true;
+                }
+                const std::string ack = processor->onCommData(line);
+                if (!sendAll(client_fd, ack + "\n")) {
+                    std::cout << "Processor TCP write failed for " << peer_label << std::endl;
+                    return false;
+                }
+            }
+            continue;
+        }
+        if (received == 0) {
+            return true;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        std::cout << "Processor TCP read failed for " << peer_label << ": "
+                  << std::strerror(errno) << std::endl;
+        return false;
+    }
+}
+
+int runProcessorTcpServer(MainProcessor* processor, std::uint16_t port) {
+    std::string error;
+    const int listen_fd = createListenSocket(port, &error);
+    if (listen_fd < 0) {
+        std::cerr << "Failed to start processor TCP listener on port " << port
+                  << ": " << error << std::endl;
+        return 1;
+    }
+
+    std::cout << "Main processor listening on 0.0.0.0:" << port << std::endl;
+    while (true) {
+        sockaddr_in client_addr {};
+        socklen_t client_len = sizeof(client_addr);
+        const int client_fd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+        if (client_fd < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::cerr << "processor_accept_failed: " << std::strerror(errno) << std::endl;
+            ::close(listen_fd);
+            return 1;
+        }
+
+        const std::string peer_label = formatPeerAddress(client_addr);
+        const bool ok = handleProcessorTcpClient(client_fd, processor, peer_label);
+        ::close(client_fd);
+        std::cout << "Processor TCP client disconnected from " << peer_label
+                  << " status=" << (ok ? "normal" : "error") << std::endl;
+    }
+}
+
 void printUsage() {
     std::cout << "Main Processor Hub (Step2)\n"
               << "Self-test:\n"
               << "  --d435i-selftest\n"
+              << "TCP processor backend:\n"
+              << "  --tcp [--port 19521] [--mock-d435i]\n"
               << "Config start:\n"
               << "  C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest>\n"
               << "Realtime:\n"
@@ -1281,13 +1459,43 @@ int runD435iSelfTest() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc > 1 && std::string(argv[1]) == "--d435i-selftest") {
-        return runD435iSelfTest();
+    bool tcp_mode = false;
+    bool use_mock_d435i = false;
+    std::uint16_t tcp_port = kDefaultProcessorListenPort;
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--d435i-selftest") {
+            return runD435iSelfTest();
+        }
+        if (arg == "--tcp") {
+            tcp_mode = true;
+        } else if (arg == "--mock-d435i") {
+            use_mock_d435i = true;
+        } else if (arg == "--port" && i + 1 < argc) {
+            int parsed_port = 0;
+            if (!parseInt(argv[++i], &parsed_port) || parsed_port <= 0 || parsed_port > 65535) {
+                std::cerr << "bad --port" << std::endl;
+                return 2;
+            }
+            tcp_port = static_cast<std::uint16_t>(parsed_port);
+        } else if (arg == "--help" || arg == "-h") {
+            printUsage();
+            return 0;
+        } else {
+            std::cerr << "unknown argument: " << arg << std::endl;
+            return 2;
+        }
     }
+
     ControlDownlink downlink;
-    MainProcessor processor(std::move(downlink));
+    MainProcessor processor(std::move(downlink), use_mock_d435i);
 
     printUsage();
+    if (tcp_mode) {
+        return runProcessorTcpServer(&processor, tcp_port);
+    }
+
     std::string line;
     while (std::getline(std::cin, line)) {
         if (line == "q" || line == "Q") {

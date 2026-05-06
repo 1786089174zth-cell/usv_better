@@ -358,6 +358,7 @@ struct SlamExecutionLayerClient::Impl {
             result.ok = false;
             result.timeout = false;
             result.quality_score = 0;
+            result.error_detail = "executor_inactive_or_session_mismatch";
             return result;
         }
 
@@ -389,9 +390,11 @@ struct SlamExecutionLayerClient::Impl {
             feature_bytes.push_back(static_cast<std::uint8_t>((frame.frame_id >> 24) & 0xFFu));
         } else {
             result.ok = false;
-            result.timeout = false;
+            result.timeout = capture_error.find("timeout") != std::string::npos ||
+                             capture_error.find("didn't arrive within") != std::string::npos;
             result.quality_score = 0;
             last_runtime_error = capture_error.empty() ? "capture_failed_unknown" : capture_error;
+            result.error_detail = last_runtime_error;
             std::cerr << "ProcessFrame capture failed: " << last_runtime_error << std::endl;
             return result;
         }
@@ -416,6 +419,7 @@ struct SlamExecutionLayerClient::Impl {
         if (result.timeout) {
             result.ok = false;
             result.quality_score = 0;
+            result.error_detail = "executor_timeout";
             return result;
         }
 

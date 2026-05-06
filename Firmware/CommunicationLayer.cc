@@ -1,12 +1,15 @@
 #include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <deque>
 #include <iomanip>
 #include <iostream>
 #include <netinet/in.h>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
@@ -18,6 +21,7 @@
 namespace {
 
 constexpr std::uint16_t kDefaultListenPort = 19520;
+constexpr std::uint16_t kDefaultProcessorPort = 19521;
 constexpr std::uint16_t kListenPorts[] = {19520, 9773, 11514, 23758, 52019};
 
 struct ParsedMessage {
@@ -48,17 +52,117 @@ struct GatewayMetrics {
     std::deque<double> ack_dl_ms_samples;
 };
 
+bool sendAll(int fd, const std::string& payload);
+
 class ProcessorClient {
 public:
-    std::string dispatch(const std::string& normalized_payload) {
-        // Placeholder for IPC dispatch to usv_control / main processor.
-        // In production, this should forward normalized_payload to MainProcessor
-        // and return its ACK in the format: ACK OK/ERR seq=... up_ms=... down_ms=... tag=... detail=...
-        // For now, returning a valid sample ACK that parseProcessorAck can handle.
+    ProcessorClient(std::string host, std::uint16_t port, std::uint32_t timeout_ms)
+        : host_(std::move(host)), port_(port), timeout_ms_(timeout_ms) {}
+
+    bool dispatch(const std::string& normalized_payload, std::string* ack, std::string* error) const {
+        if (ack == nullptr) {
+            if (error != nullptr) {
+                *error = "ack_output_null";
+            }
+            return false;
+        }
+
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            if (error != nullptr) {
+                *error = std::string("processor_socket_failed:") + std::strerror(errno);
+            }
+            return false;
+        }
+
+        timeval tv {};
+        tv.tv_sec = static_cast<time_t>(timeout_ms_ / 1000u);
+        tv.tv_usec = static_cast<suseconds_t>((timeout_ms_ % 1000u) * 1000u);
+        (void)::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+        sockaddr_in addr {};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port_);
+        if (::inet_pton(AF_INET, host_.c_str(), &addr.sin_addr) != 1) {
+            if (error != nullptr) {
+                *error = "processor_bad_host";
+            }
+            ::close(fd);
+            return false;
+        }
+
+        if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            if (error != nullptr) {
+                *error = std::string("processor_connect_failed:") + std::strerror(errno);
+            }
+            ::close(fd);
+            return false;
+        }
+
+        const std::string outbound = normalized_payload + "\n";
+        if (!sendAll(fd, outbound)) {
+            if (error != nullptr) {
+                *error = std::string("processor_send_failed:") + std::strerror(errno);
+            }
+            ::close(fd);
+            return false;
+        }
+
+        std::string buffer;
+        char ch = '\0';
+        while (true) {
+            const ssize_t received = ::recv(fd, &ch, 1, 0);
+            if (received > 0) {
+                if (ch == '\n') {
+                    break;
+                }
+                if (ch != '\r') {
+                    buffer.push_back(ch);
+                }
+                if (buffer.size() > kMaxProcessorAckBytes) {
+                    if (error != nullptr) {
+                        *error = "processor_ack_too_large";
+                    }
+                    ::close(fd);
+                    return false;
+                }
+                continue;
+            }
+            if (received == 0) {
+                if (error != nullptr) {
+                    *error = "processor_closed_without_ack";
+                }
+                ::close(fd);
+                return false;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            if (error != nullptr) {
+                *error = std::string("processor_recv_failed:") + std::strerror(errno);
+            }
+            ::close(fd);
+            return false;
+        }
+
+        ::close(fd);
+        *ack = buffer;
+        return true;
+    }
+
+    std::string endpointLabel() const {
         std::ostringstream oss;
-        oss << "ACK OK seq=0 up_ms=0 down_ms=5 tag=gw_forwarded detail=placeholder";
+        oss << host_ << ':' << port_;
         return oss.str();
     }
+
+private:
+    static constexpr std::size_t kMaxProcessorAckBytes = 16384;
+
+    std::string host_;
+    std::uint16_t port_ = kDefaultProcessorPort;
+    std::uint32_t timeout_ms_ = 1000;
 };
 
 class CommunicationLayer {
@@ -95,9 +199,19 @@ public:
         }
 
         const auto route_begin = std::chrono::steady_clock::now();
-        const std::string processor_ack = processor_client_.dispatch(traced_msg.normalized_payload);
+        std::string processor_ack;
+        std::string route_error;
+        const bool dispatched = processor_client_.dispatch(traced_msg.normalized_payload, &processor_ack, &route_error);
         const double route_ms = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - route_begin).count() / 1000.0;
+        if (!dispatched) {
+            metrics_.route_timeout += 1;
+            const std::string ack = buildAck(false, traced_msg.seq, 0, 0,
+                                             "gw_route_fail", route_error.empty() ? "processor_unavailable" : route_error,
+                                             trace_id, "route_fail");
+            recordAck(false, 0.0);
+            return ack;
+        }
         if (route_ms > static_cast<double>(switches_.route_timeout_ms)) {
             metrics_.route_timeout += 1;
             const std::string ack = buildAck(false, traced_msg.seq, 0, 0,
@@ -500,14 +614,18 @@ private:
     static ProcessorAckFields parseProcessorAck(const std::string& ack_str) {
         ProcessorAckFields fields;
         std::istringstream iss(ack_str);
-        
-        std::string ack_kw, status;
-        if (!(iss >> ack_kw >> status)) {
-            return fields;  // Invalid format
+
+        std::string ack_kw;
+        std::string status;
+        if (!(iss >> ack_kw >> status) || ack_kw != "ACK" ||
+            !(status == "OK" || status == "ERR")) {
+            fields.tag = "gw_bad_processor_ack";
+            fields.detail = "invalid_ack_header";
+            return fields;
         }
-        
+
         fields.ok = (status == "OK");
-        
+
         std::string kv;
         while (iss >> kv) {
             std::string key, value;
@@ -529,6 +647,19 @@ private:
         return fields;
     }
 
+    static std::string sanitizeAckValue(const std::string& value) {
+        std::string out;
+        out.reserve(value.size());
+        for (const unsigned char ch : value) {
+            if (std::isspace(ch) || std::iscntrl(ch)) {
+                out.push_back('_');
+            } else {
+                out.push_back(static_cast<char>(ch));
+            }
+        }
+        return out.empty() ? "none" : out;
+    }
+
     static std::string buildAck(bool ok,
                                 std::uint32_t seq,
                                 std::uint64_t up_ms,
@@ -542,10 +673,10 @@ private:
             << " seq=" << seq
             << " up_ms=" << up_ms
             << " down_ms=" << down_ms
-            << " tag=" << tag
-            << " detail=" << detail
-            << " gw_trace=" << gw_trace
-            << " gw_route=" << gw_route;
+            << " tag=" << sanitizeAckValue(tag)
+            << " detail=" << sanitizeAckValue(detail)
+            << " gw_trace=" << sanitizeAckValue(gw_trace)
+            << " gw_route=" << sanitizeAckValue(gw_route);
         return oss.str();
     }
 
@@ -636,6 +767,8 @@ private:
                                  std::uint64_t recv_ms,
                                  const std::chrono::steady_clock::time_point& recv_tp,
                                  std::string* response) {
+        (void)recv_ms;
+        (void)recv_tp;
         if (response == nullptr) {
             return false;
         }
@@ -918,6 +1051,7 @@ int runTcpServer(CommunicationLayer* comm, std::uint16_t port) {
 void printUsage() {
     std::cout << "Communication Layer (Gateway Adapter)\n"
               << "TCP listener: 0.0.0.0:" << kDefaultListenPort << " (fallback order: 19520, 9773, 11514, 23758, 52019)\n"
+              << "Processor backend: --processor-host <ip> --processor-port <port> (default 127.0.0.1:" << kDefaultProcessorPort << ")\n"
               << "Line protocol: one command per line, newline-delimited over TCP\n"
               << "Realtime short frame:\n"
               << "  R <seq> <F|L|R> [client_ts_ms]\n"
@@ -931,7 +1065,7 @@ void printUsage() {
               << "  C STOP seq=<n> ts=<ms>\n"
               << "  CE seq=<n> ts=<ms>  # legacy alias\n"
               << "ACK template:\n"
-              << "  ACK <OK|ERR> seq=<n> detail=<code> rx_ms=<n> ul_ms=<n> dl_ms=<n> trace=<id> route=<result>\n"
+              << "  ACK <OK|ERR> seq=<n> up_ms=<n> down_ms=<n> tag=<code> detail=<code_or_payload> gw_trace=<id> gw_route=<result>\n"
               << "Gateway management:\n"
               << "  GW HEALTH\n"
               << "  GW SWITCH legacy_alias=<on|off> sli_enabled=<on|off> route_timeout_ms=<1..5000>\n"
@@ -942,8 +1076,73 @@ void printUsage() {
 
 }  // namespace
 
-int main() {
-    ProcessorClient processor_client;
+bool parseIntArg(const std::string& value, int* out) {
+    if (out == nullptr || value.empty()) {
+        return false;
+    }
+    std::istringstream iss(value);
+    int parsed = 0;
+    iss >> parsed;
+    if (!iss || !iss.eof()) {
+        return false;
+    }
+    *out = parsed;
+    return true;
+}
+
+std::optional<std::uint16_t> parsePortArg(const std::string& value) {
+    int port = 0;
+    if (!parseIntArg(value, &port) || port <= 0 || port > 65535) {
+        return std::nullopt;
+    }
+    return static_cast<std::uint16_t>(port);
+}
+
+int main(int argc, char** argv) {
+    std::string processor_host = "127.0.0.1";
+    std::uint16_t processor_port = kDefaultProcessorPort;
+    std::uint32_t processor_timeout_ms = 1000;
+
+    if (const char* env_host = std::getenv("USV_PROCESSOR_HOST")) {
+        processor_host = env_host;
+    }
+    if (const char* env_port = std::getenv("USV_PROCESSOR_PORT")) {
+        const auto parsed = parsePortArg(env_port);
+        if (parsed.has_value()) {
+            processor_port = *parsed;
+        }
+    }
+
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--processor-host" && i + 1 < argc) {
+            processor_host = argv[++i];
+        } else if (arg == "--processor-port" && i + 1 < argc) {
+            const auto parsed = parsePortArg(argv[++i]);
+            if (!parsed.has_value()) {
+                std::cerr << "bad --processor-port" << std::endl;
+                return 2;
+            }
+            processor_port = *parsed;
+        } else if (arg == "--processor-timeout-ms" && i + 1 < argc) {
+            int timeout = 0;
+            if (!parseIntArg(argv[++i], &timeout) || timeout <= 0 || timeout > 60000) {
+                std::cerr << "bad --processor-timeout-ms" << std::endl;
+                return 2;
+            }
+            processor_timeout_ms = static_cast<std::uint32_t>(timeout);
+        } else if (arg == "--help" || arg == "-h") {
+            printUsage();
+            return 0;
+        } else {
+            std::cerr << "unknown argument: " << arg << std::endl;
+            return 2;
+        }
+    }
+
+    ProcessorClient processor_client(processor_host, processor_port, processor_timeout_ms);
+    std::cout << "Gateway forwarding to processor " << processor_client.endpointLabel()
+              << " timeout_ms=" << processor_timeout_ms << std::endl;
     CommunicationLayer comm(std::move(processor_client));
 
     printUsage();

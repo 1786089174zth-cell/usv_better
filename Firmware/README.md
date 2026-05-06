@@ -43,10 +43,10 @@ If your RealSense installation is not in a default compiler search path, add the
 Run the communication layer with:
 
 ```bash
-./communication_layer_demo
+./communication_layer_demo --processor-host 127.0.0.1 --processor-port 19521
 ```
 
-It listens on `0.0.0.0`. The default port is `19520`; if unavailable, it tries fallback ports in this order: `9773`, `11514`, `23758`, `52019`.
+It listens on `0.0.0.0`. The default client-facing port is `19520`; if unavailable, it tries fallback ports in this order: `9773`, `11514`, `23758`, `52019`. Gateway traffic is forwarded to the processor TCP backend at `127.0.0.1:19521` by default. Override that backend with `--processor-host`, `--processor-port`, `--processor-timeout-ms`, or the `USV_PROCESSOR_HOST` / `USV_PROCESSOR_PORT` environment variables.
 
 ### Main processor
 
@@ -56,7 +56,30 @@ Run the processor in stdin/stdout mode with:
 ./main_processor_demo
 ```
 
-The `SLI` processing path attempts D435i capture through the SLAM execution bridge. On a host without a D435i device and RealSense runtime, `SLI` commands can return capture errors.
+Run the processor as the production TCP backend for the gateway with:
+
+```bash
+./main_processor_demo --tcp --port 19521
+```
+
+For lab end-to-end tests without a physical D435i, add `--mock-d435i`:
+
+```bash
+./main_processor_demo --tcp --port 19521 --mock-d435i
+```
+
+The `SLI` processing path attempts D435i capture through the SLAM execution bridge. On a host without a D435i device and RealSense runtime, `SLI` commands can return capture errors unless `--mock-d435i` is enabled.
+
+### End-to-end TCP smoke test
+
+Start the processor first, then the gateway:
+
+```bash
+./main_processor_demo --tcp --port 19521 --mock-d435i
+./communication_layer_demo --processor-host 127.0.0.1 --processor-port 19521 --processor-timeout-ms 2000
+```
+
+Connect clients to the gateway at `127.0.0.1:19520` and send newline-delimited frames. `C START` must succeed before realtime `R` commands are accepted.
 
 ### D435i self-test and smoke test
 
@@ -200,6 +223,7 @@ ACK <OK|ERR> seq=<n> up_ms=<n> down_ms=<n> tag=<code> detail=<code_or_payload> g
 - Gateway `tag` examples: `gw_bad_msg`, `gw_route_timeout`, `gw_switch`, `gw_rollback`.
 - `up_ms` is computed from the command transmit timestamp when possible; otherwise it can be `0`.
 - `down_ms` is local processing/downlink time measured by the processor or parsed from processor ACK by the gateway.
+- ACK values are single-token fields. The processor and gateway replace whitespace/control characters in `tag`, `detail`, `gw_trace`, and `gw_route` with `_` before emitting ACKs so forwarded ACK parsing remains deterministic.
 - `gw_trace` is the gateway-side trace identifier used for cross-layer correlation.
 - `gw_route` describes gateway routing outcome such as `forwarded`, `parse_reject`, `route_timeout`, or `mgmt`.
 

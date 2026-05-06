@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-#include <librealsense2/rs.hpp>
 
 namespace slam_exec {
 
@@ -66,6 +65,7 @@ struct ExecutorResult {
     int quality_score = 0;
     std::uint32_t proc_ms = 0;
     std::vector<std::uint32_t> groups;
+    std::string error_detail;
 };
 
 struct D435iFrameSample {
