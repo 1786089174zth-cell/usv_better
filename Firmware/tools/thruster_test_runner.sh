@@ -51,7 +51,11 @@ percent_to_binary_duty_ns() {
     if (p <= 0) {
       print 0;
     } else {
-      print period;
+      if (period > 1) {
+        print period - 1;
+      } else {
+        print period;
+      }
     }
   }'
 }
@@ -105,20 +109,20 @@ if [[ $HW_MODE -eq 1 ]]; then
   fi
   # Some PWM drivers require disable before period updates.
   sysfs_write "$PWM1_DIR/enable" "0" || true
-  sysfs_write "$PWM1_DIR/duty_cycle" "0"
   sysfs_write "$PWM1_DIR/period" "$PERIOD_NS"
+  sysfs_write "$PWM1_DIR/duty_cycle" "0"
   sysfs_write "$PWM1_DIR/enable" "1"
 
   sysfs_write "$PWM2_DIR/enable" "0" || true
-  sysfs_write "$PWM2_DIR/duty_cycle" "0"
   sysfs_write "$PWM2_DIR/period" "$PERIOD_NS"
+  sysfs_write "$PWM2_DIR/duty_cycle" "0"
   sysfs_write "$PWM2_DIR/enable" "1"
 fi
 
 echo "Running in $([[ $HW_MODE -eq 1 ]] && echo HW || echo dry-run) mode"
 echo "Input format: <left_percent> <right_percent>"
 echo "Percent range: 0 to 100 only, mapped in binary mode"
-echo "Mapping rule: 0 -> 0ns, positive value -> ${PERIOD_NS}ns"
+echo "Mapping rule: 0 -> 0ns, positive value -> $((PERIOD_NS - 1))ns"
 echo "Type q to quit."
 echo "Safety: 0% always maps to duty_ns=0 (hard stop), positive values force ON."
 echo "Hardware pin mapping: pwm1 -> pin8 (PH3), pwm2 -> pin10 (PH2)"

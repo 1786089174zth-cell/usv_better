@@ -7,6 +7,8 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <filesystem>
+#include <cstdlib>
 
 namespace {
 
@@ -79,7 +81,11 @@ private:
 		if (percent <= 0.0f) {
 			return 0;
 		}
-		return std::max(0, cfg_.pwm_period_ns);
+		const int period = std::max(0, cfg_.pwm_period_ns);
+		if (period > 1) {
+			return period - 1;
+		}
+		return period;
 	}
 
 	MapperConfig cfg_;
@@ -87,18 +93,14 @@ private:
 
 class SysfsPwmWriter {
 public:
-	SysfsPwmWriter(std::string left_duty_path, std::string right_duty_path, bool dry_run)
+	SysfsPwmWriter(std::string left_duty_path, std::string right_duty_path)
 		: left_duty_path_(std::move(left_duty_path)),
-		  right_duty_path_(std::move(right_duty_path)),
-		  dry_run_(dry_run) {}
+		  right_duty_path_(std::move(right_duty_path)) {}
 
 	bool writeDuty(int left_duty_ns, int right_duty_ns) const {
-		if (dry_run_) {
-			std::cout << "[DRY-RUN] write duty_ns: left=" << left_duty_ns
-					  << ", right=" << right_duty_ns << std::endl;
-			return true;
-		}
-
+		std::cout << "[DEBUG] Writing to sysfs: left=" << left_duty_ns 
+				  << " (" << left_duty_path_ << "), right=" << right_duty_ns 
+				  << " (" << right_duty_path_ << ")" << std::endl;
 		if (!writeInt(left_duty_path_, left_duty_ns)) {
 			std::cerr << "ERR: failed writing left duty path" << std::endl;
 			return false;
@@ -130,8 +132,72 @@ private:
 
 	std::string left_duty_path_;
 	std::string right_duty_path_;
-	bool dry_run_;
 };
+
+// PWM helper functions: init, cleanup, sysfs writes.
+namespace pwm {
+using namespace std::chrono_literals;
+
+static bool writeStr(const std::string& path, const std::string& value) {
+	for (int i = 0; i < 3; ++i) {
+		std::ofstream f(path);
+		if (!f.is_open()) {
+			std::this_thread::sleep_for(10ms);
+			continue;
+		}
+		f << value << '\n';
+		if (f.good()) return true;
+		std::this_thread::sleep_for(10ms);
+	}
+	std::cerr << "ERR: pwm write failed: " << path << " -> '" << value << "'" << std::endl;
+	return false;
+}
+
+static void ensure_exported(const std::string& chip_dir, const std::string& pwm_dir, int channel) {
+	if (std::filesystem::exists(pwm_dir)) return;
+	for (int i = 0; i < 5; ++i) {
+		writeStr(chip_dir + "/export", std::to_string(channel));
+		std::this_thread::sleep_for(100ms);
+		if (std::filesystem::exists(pwm_dir)) return;
+	}
+}
+
+static void init_all() {
+	const std::string chip = "/sys/class/pwm/pwmchip0";
+	const std::string pwm1 = chip + "/pwm1";
+	const std::string pwm2 = chip + "/pwm2";
+	if (!std::filesystem::exists(chip)) {
+		std::cerr << "WARN: pwm chip dir not present: " << chip << std::endl;
+		return;
+	}
+	ensure_exported(chip, pwm1, 1);
+	ensure_exported(chip, pwm2, 2);
+
+	if (!std::filesystem::exists(pwm1) || !std::filesystem::exists(pwm2)) {
+		std::cerr << "WARN: pwm channels missing after export" << std::endl;
+		return;
+	}
+
+	// Disable -> set period -> duty=0 -> enable (same ordering as shell runner)
+	writeStr(pwm1 + "/enable", "0");
+	writeStr(pwm1 + "/period", std::to_string(20000000));
+	writeStr(pwm1 + "/duty_cycle", "0");
+	writeStr(pwm1 + "/enable", "1");
+
+	writeStr(pwm2 + "/enable", "0");
+	writeStr(pwm2 + "/period", std::to_string(20000000));
+	writeStr(pwm2 + "/duty_cycle", "0");
+	writeStr(pwm2 + "/enable", "1");
+}
+
+static void cleanup_all() {
+    // We remove the automatic cleanup that disables/unexports PWM
+    // so that the PWM state persists after the C++ process exits,
+    // just like the shell script doesn't unexport on every command.
+    std::cout << "[DEBUG] Keeping PWM state active for hardware output." << std::endl;
+}
+
+} // namespace pwm
 void printUsage() {
 	std::cout << "Thruster executor demo\n"
 			  << "Input format: <left_percent> <right_percent>\n"
@@ -151,12 +217,13 @@ int main(int argc, char** argv) {
 
 	ThrusterMapper mapper(cfg);
 
-	// Default to dry-run so this binary can run safely on non-Orangepi hosts.
-	const bool dry_run = true;
+	// Initialize PWM sysfs like thruster_test_runner.sh
+	pwm::init_all();
+	std::atexit(pwm::cleanup_all);
+
 	SysfsPwmWriter writer(
 		"/sys/class/pwm/pwmchip0/pwm1/duty_cycle",
-		"/sys/class/pwm/pwmchip0/pwm2/duty_cycle",
-		dry_run);
+		"/sys/class/pwm/pwmchip0/pwm2/duty_cycle");
 
 	auto run_once = [&](float left, float right) {
 		ThrusterInput in;
@@ -172,33 +239,47 @@ int main(int argc, char** argv) {
 		return ok ? 0 : 1;
 	};
 
-	if (argc == 3) {
-		const float left = std::stof(argv[1]);
-		const float right = std::stof(argv[2]);
-		const int rc = run_once(left, right);
-		writer.writeDuty(0, 0);
-		return rc;
+	// Accept single-letter ACKs: F (forward), L (left), R (right), S (stop)
+	if (argc == 2) {
+		std::string cmd = argv[1];
+		if (!cmd.empty()) {
+			char c = std::toupper(cmd[0]);
+			float left = 0.0f, right = 0.0f;
+			switch (c) {
+				case 'F': left = 100.0f; right = 100.0f; break;
+				case 'L': left = 100.0f; right = 0.0f; break;
+				case 'R': left = 0.0f; right = 100.0f; break;
+				case 'S': left = 0.0f; right = 0.0f; break;
+				default:
+					std::cerr << "ERR: unknown command. Use F,L,R,S" << std::endl;
+					return 2;
+			}
+			const int rc = run_once(left, right);
+			// writer.writeDuty(0, 0); // Removed to keep output persistent
+			return rc;
+		}
 	}
 
-	printUsage();
+	std::cout << "Input: single letter ACK F (forward), L (left), R (right), S (stop). q to quit." << std::endl;
 	std::string line;
 	while (std::getline(std::cin, line)) {
-		if (line == "q" || line == "Q") {
-			break;
+		if (line.empty()) continue;
+		if (line == "q" || line == "Q") break;
+		char c = std::toupper(line[0]);
+		float left = 0.0f, right = 0.0f;
+		switch (c) {
+			case 'F': left = 100.0f; right = 100.0f; break;
+			case 'L': left = 100.0f; right = 0.0f; break;
+			case 'R': left = 0.0f; right = 100.0f; break;
+			case 'S': left = 0.0f; right = 0.0f; break;
+			default:
+				std::cout << "WARN: unknown command. Use F/L/R/S or q." << std::endl;
+				continue;
 		}
-
-		std::istringstream iss(line);
-		float left = 0.0f;
-		float right = 0.0f;
-		if (!(iss >> left >> right)) {
-			std::cout << "WARN: invalid input, expect two numbers." << std::endl;
-			continue;
-		}
-
 		run_once(left, right);
 	}
 
 	// Fail-safe stop on exit.
-	writer.writeDuty(0, 0);
+	// writer.writeDuty(0, 0); // Removed to keep output persistent
 	return 0;
 }

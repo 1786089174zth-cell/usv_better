@@ -40,9 +40,9 @@ EOF
 fi
 
 echo "Using TrusterAcuator binary: $TA_BIN"
-echo "交互式模式：输入两列 0..100 的百分比（left right），回车发送；输入 q 退出。"
-echo "Binary 输出规则：0 -> 0ns，正值 -> 20000000ns。"
-echo "Safety: 0 0 = hard stop (duty 0)."
+echo "交互式模式：输入单字母 ACK：F(前进) L(左) R(右) S(停止)，回车发送；输入 q 退出。"
+echo "Binary 输出规则：S -> 0ns，F/L/R -> ON (period-1) 。"
+echo "Safety: S = hard stop (duty 0)."
 
 print_help() {
   cat <<EOF
@@ -53,6 +53,7 @@ print_help() {
   q        # 退出
 EOF
 }
+
 
 print_help
 
@@ -70,32 +71,29 @@ while true; do
   if [ -z "$line" ]; then
     continue
   fi
-  # 允许用空格或逗号分隔
-  left=$(echo "$line" | awk -F'[ ,]+' '{print $1}')
-  right=$(echo "$line" | awk -F'[ ,]+' '{print $2}')
-  if [ -z "$right" ]; then
-    echo "需要两个值：left right（0..100）。输入 'h' 查看帮助。"
-    continue
-  fi
-
-  # 验证是数字且在 0..100
-  re='^[0-9]+([.][0-9]+)?$'
-  if ! [[ $left =~ $re ]] || ! [[ $right =~ $re ]]; then
-    echo "输入错误：请使用数字，范围 0..100。"
-    continue
-  fi
-  # 强制为整数（或者保留小数）
-  # bounds
-  left_val=$(awk "BEGIN{printf \"%.0f\", ($left<0?0:($left>100?100:$left))}")
-  right_val=$(awk "BEGIN{printf \"%.0f\", ($right<0?0:($right>100?100:$right))}")
-
-  echo "发送到 TrusterAcuator: left=$left_val% right=$right_val%"
-
-  # 调用 TA，可根据 TA 的实际参数接口修改
-  set +e
-  "$TA_BIN" "$left_val" "$right_val"
-  rc=$?
-  set -e
+  cmd=$(echo "$line" | awk '{print toupper($1)}')
+  case "$cmd" in
+    F)
+      echo "发送 F -> both ON"
+      set +e; "$TA_BIN" F; rc=$?; set -e
+      ;;
+    L)
+      echo "发送 L -> left ON"
+      set +e; "$TA_BIN" L; rc=$?; set -e
+      ;;
+    R)
+      echo "发送 R -> right ON"
+      set +e; "$TA_BIN" R; rc=$?; set -e
+      ;;
+    S)
+      echo "发送 S -> stop"
+      set +e; "$TA_BIN" S; rc=$?; set -e
+      ;;
+    *)
+      echo "未知命令：使用 F/L/R/S 或 q 退出"
+      continue
+      ;;
+  esac
   if [ $rc -ne 0 ]; then
     echo "TrusterAcuator 返回非零状态: $rc" >&2
   fi
