@@ -72,19 +72,27 @@ The `SLI` processing path attempts D435i capture through the SLAM execution brid
 
 ### End-to-end TCP smoke test
 
-Start the processor first, then the gateway:
+Start the processor first, then the gateway. Use the real D435i by default:
 
 ```bash
-./main_processor_demo --tcp --port 19521 --mock-d435i
+./main_processor_demo --tcp --port 19521
 ./communication_layer_demo --processor-host 127.0.0.1 --processor-port 19521 --processor-timeout-ms 2000
 ```
 
+For lab-only testing without hardware, add `--mock-d435i` to the processor command.
+
 Connect clients to the gateway at `127.0.0.1:19520` and send newline-delimited frames. `C START` must succeed before realtime `R` commands are accepted.
 
-For a one-command local build/start workflow, run:
+For a one-command local build/start workflow with the real D435i, run:
 
 ```bash
 bash tools/run_tcp_stack.sh
+```
+
+For mock data, run:
+
+```bash
+MOCK_D435I=1 bash tools/run_tcp_stack.sh
 ```
 
 For a full client flow (`C START` -> realtime actions -> `C STOP`) that requests 64 interval-picked D435i rows with R/depth pairs by default, run from a client machine:
@@ -93,7 +101,7 @@ For a full client flow (`C START` -> realtime actions -> `C STOP`) that requests
 python tools/usv_tcp_full_flow_client.py --host <gateway-ip> --interactive --print-full-detail
 ```
 
-The client exposes C START sampling parameters such as `--max-rows`, `--sample-stride`, and `--channel-mode`; defaults are `--max-rows 64 --sample-stride 64 --channel-mode R`. Realtime ACK details return color and depth as separate lists (`r=...` and `depth=...`) and mark IMU data with the `IMU_gyro=` header. Each capture resets the output sample before filling it and drains queued RealSense frames to use the latest frame available. Running the client without `--actions` uses WASD interactive mode on Windows and only exits when `Q` is pressed.
+The client exposes C START sampling parameters such as `--max-rows`, `--sample-stride`, and `--channel-mode`; defaults are `--max-rows 64 --sample-stride 64 --channel-mode R`. Realtime ACK details return color and depth as separate lists (`r=...` and `depth=...`) and mark IMU data with the `IMU_gyro=` header. Each capture resets the output sample before filling it and drains queued RealSense frames to use the latest frame available. Mock mode produces changing synthetic frames for plumbing tests, but it will not react to covering the physical D435i; use real mode for physical sensor validation. Running the client without `--actions` uses WASD interactive mode on Windows and only exits when `Q` is pressed.
 
 ### D435i self-test and smoke test
 

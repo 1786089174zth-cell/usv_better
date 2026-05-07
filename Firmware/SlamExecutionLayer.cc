@@ -304,6 +304,8 @@ public:
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
         out->frame_id = ++capture_seq_;
+        const int phase = static_cast<int>(capture_seq_ % 64u);
+        const int wave = phase <= 32 ? phase : 64 - phase;
         out->color_width = kWidth;
         out->color_height = kHeight;
         out->depth_width = kWidth;
@@ -319,22 +321,22 @@ public:
         out->depth_row.reserve(row_indices.size() * samples_per_row);
         for (const int row_index : row_indices) {
             for (int x = 0; x < sample_limit; x += stride) {
-                const std::uint8_t r = static_cast<std::uint8_t>((x + row_index) & 0xFF);
-                const std::uint8_t g = static_cast<std::uint8_t>(row_index & 0xFF);
-                const std::uint8_t b = static_cast<std::uint8_t>((x + row_index) & 0xFF);
+                const std::uint8_t r = static_cast<std::uint8_t>((x + row_index + wave * 3) & 0xFF);
+                const std::uint8_t g = static_cast<std::uint8_t>((row_index + wave) & 0xFF);
+                const std::uint8_t b = static_cast<std::uint8_t>((x + row_index + wave * 5) & 0xFF);
                 out->rgb_row.push_back(r);
                 out->rgb_row.push_back(g);
                 out->rgb_row.push_back(b);
 
                 const std::uint16_t depth = static_cast<std::uint16_t>(
-                    800u + ((static_cast<std::uint32_t>(x + row_index) * 3u) % 2200u));
+                    800u + ((static_cast<std::uint32_t>(x + row_index) * 3u + static_cast<std::uint32_t>(wave) * 17u) % 2200u));
                 out->depth_row.push_back(depth);
             }
         }
 
-        out->gyro_x = 0.01f;
-        out->gyro_y = 0.02f;
-        out->gyro_z = 0.03f;
+        out->gyro_x = 0.01f * static_cast<float>(wave);
+        out->gyro_y = 0.02f * static_cast<float>(wave - 16);
+        out->gyro_z = 0.03f * static_cast<float>(32 - wave);
         return true;
     }
 

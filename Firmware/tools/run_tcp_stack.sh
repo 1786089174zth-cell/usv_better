@@ -6,7 +6,7 @@ FW_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROCESSOR_PORT="${PROCESSOR_PORT:-19521}"
 GATEWAY_HOST="${GATEWAY_HOST:-127.0.0.1}"
 PROCESSOR_TIMEOUT_MS="${PROCESSOR_TIMEOUT_MS:-8000}"
-MOCK_D435I="${MOCK_D435I:-1}"
+MOCK_D435I="${MOCK_D435I:-0}"
 CXX="${CXX:-g++}"
 CXXFLAGS="${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra -pedantic}"
 LDFLAGS_REALSENSE="${LDFLAGS_REALSENSE:--lrealsense2}"
@@ -29,6 +29,9 @@ trap cleanup EXIT INT TERM
 processor_args=("--tcp" "--port" "${PROCESSOR_PORT}")
 if [[ "${MOCK_D435I}" == "1" || "${MOCK_D435I}" == "true" || "${MOCK_D435I}" == "on" ]]; then
   processor_args+=("--mock-d435i")
+  echo "[INFO] D435i mode: MOCK (set MOCK_D435I=0 to use real camera)"
+else
+  echo "[INFO] D435i mode: REAL (set MOCK_D435I=1 for lab mock data)"
 fi
 
 echo "[3/3] starting processor backend on :${PROCESSOR_PORT}"
