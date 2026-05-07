@@ -4,7 +4,10 @@
 #include <cstdint>
 #include <cctype>
 #include <cstring>
+#include <cstdlib>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -347,18 +350,44 @@ private:
 
 class ControlDownlink {
 public:
+    ControlDownlink() {
+        sysfs_enabled_ = true;
+        const char* env_sysfs = std::getenv("USV_THRUSTER_SYSFS");
+        if (env_sysfs != nullptr) {
+            if (isTruthy(env_sysfs)) {
+                sysfs_enabled_ = true;
+            } else if (isFalsey(env_sysfs)) {
+                sysfs_enabled_ = false;
+            }
+        }
+        if (sysfs_enabled_) {
+            sysfs_ready_ = initSysfs();
+        }
+    }
+
     bool sendAction(ActionType action, const ControlConfig& cfg) {
         (void)cfg;
         const auto duty_pair = actionToDutyNs(action);
+        if (sysfs_enabled_) {
+            if (!sysfs_ready_ && !initSysfs()) {
+                std::cerr << "DOWNLINK sysfs init failed: " << last_error_ << std::endl;
+                return false;
+            }
+            if (!writeDutyPair(duty_pair.first, duty_pair.second)) {
+                std::cerr << "DOWNLINK sysfs write failed: " << last_error_ << std::endl;
+                return false;
+            }
+        }
         std::cout << "DOWNLINK action=" << actionToString(action)
                   << " left_duty_ns=" << duty_pair.first
-                  << " right_duty_ns=" << duty_pair.second << std::endl;
+                  << " right_duty_ns=" << duty_pair.second
+                  << " mode=" << (sysfs_enabled_ ? "sysfs" : "log")
+                  << std::endl;
         return true;
     }
 
     bool sendZero() {
-        std::cout << "DOWNLINK action=ZERO" << std::endl;
-        return true;
+        return sendAction(ActionType::Zero, ControlConfig{});
     }
 
     std::string buildSlamFrame(std::uint32_t seq, const SlamOutput& output) const {
@@ -398,21 +427,135 @@ public:
     }
 
 private:
-    static std::pair<int, int> actionToDutyNs(ActionType action) {
-        constexpr int kDutyOffNs = 0;
-        constexpr int kDutyOnNs = 20000000;
+    static constexpr const char* kPwmChipDir = "/sys/class/pwm/pwmchip0";
+    static constexpr const char* kPwm1Dir = "/sys/class/pwm/pwmchip0/pwm1";
+    static constexpr const char* kPwm2Dir = "/sys/class/pwm/pwmchip0/pwm2";
+
+    static bool isTruthy(const char* value) {
+        if (value == nullptr || value[0] == '\0') {
+            return false;
+        }
+        const char c = static_cast<char>(std::tolower(value[0]));
+        return c == '1' || c == 't' || c == 'y';
+    }
+
+    static bool isFalsey(const char* value) {
+        if (value == nullptr || value[0] == '\0') {
+            return false;
+        }
+        const char c = static_cast<char>(std::tolower(value[0]));
+        return c == '0' || c == 'f' || c == 'n' || c == 'o';
+    }
+
+    bool initSysfs() {
+        last_error_.clear();
+        if (!std::filesystem::exists(kPwmChipDir)) {
+            last_error_ = "pwm_chip_missing";
+            return false;
+        }
+        if (!ensureExported(kPwm1Dir, 1) || !ensureExported(kPwm2Dir, 2)) {
+            if (last_error_.empty()) {
+                last_error_ = "pwm_export_failed";
+            }
+            return false;
+        }
+        if (!std::filesystem::exists(kPwm1Dir) || !std::filesystem::exists(kPwm2Dir)) {
+            last_error_ = "pwm_dirs_missing";
+            return false;
+        }
+
+        const std::string pwm1_enable = std::string(kPwm1Dir) + "/enable";
+        const std::string pwm2_enable = std::string(kPwm2Dir) + "/enable";
+        const std::string pwm1_period = std::string(kPwm1Dir) + "/period";
+        const std::string pwm2_period = std::string(kPwm2Dir) + "/period";
+        const std::string pwm1_duty = std::string(kPwm1Dir) + "/duty_cycle";
+        const std::string pwm2_duty = std::string(kPwm2Dir) + "/duty_cycle";
+
+        writeStr(pwm1_enable, "0", nullptr);
+        if (!writeStr(pwm1_period, std::to_string(period_ns_), &last_error_)) return false;
+        if (!writeStr(pwm1_duty, "0", &last_error_)) return false;
+        if (!writeStr(pwm1_enable, "1", &last_error_)) return false;
+
+        writeStr(pwm2_enable, "0", nullptr);
+        if (!writeStr(pwm2_period, std::to_string(period_ns_), &last_error_)) return false;
+        if (!writeStr(pwm2_duty, "0", &last_error_)) return false;
+        if (!writeStr(pwm2_enable, "1", &last_error_)) return false;
+
+        sysfs_ready_ = true;
+        return true;
+    }
+
+    bool ensureExported(const std::string& pwm_dir, int channel) {
+        if (std::filesystem::exists(pwm_dir)) {
+            return true;
+        }
+        const std::string export_path = std::string(kPwmChipDir) + "/export";
+        for (int i = 0; i < 5; ++i) {
+            writeStr(export_path, std::to_string(channel), nullptr);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (std::filesystem::exists(pwm_dir)) {
+                return true;
+            }
+        }
+        last_error_ = "pwm_export_timeout";
+        return false;
+    }
+
+    bool writeDutyPair(int left_duty_ns, int right_duty_ns) {
+        if (!writeInt(left_duty_path_, left_duty_ns, &last_error_)) {
+            return false;
+        }
+        if (!writeInt(right_duty_path_, right_duty_ns, &last_error_)) {
+            return false;
+        }
+        return true;
+    }
+
+    static bool writeInt(const std::string& path, int value, std::string* error) {
+        return writeStr(path, std::to_string(value), error);
+    }
+
+    static bool writeStr(const std::string& path, const std::string& value, std::string* error) {
+        for (int i = 0; i < 3; ++i) {
+            std::ofstream f(path);
+            if (!f.is_open()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            f << value << '\n';
+            if (f.good()) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (error != nullptr) {
+            *error = "write_failed:" + path;
+        }
+        return false;
+    }
+
+    int dutyOnNs() const {
+        if (period_ns_ <= 0) {
+            return 0;
+        }
+        return period_ns_ > 1 ? period_ns_ - 1 : period_ns_;
+    }
+
+    std::pair<int, int> actionToDutyNs(ActionType action) const {
+        const int duty_off = 0;
+        const int duty_on = dutyOnNs();
         switch (action) {
             case ActionType::Forward:
-                return {kDutyOnNs, kDutyOnNs};
+                return {duty_on, duty_on};
             case ActionType::TurnLeft:
-                return {kDutyOffNs, kDutyOnNs};
+                return {duty_on, duty_off};
             case ActionType::TurnRight:
-                return {kDutyOnNs, kDutyOffNs};
+                return {duty_off, duty_on};
             case ActionType::Stop:
             case ActionType::Zero:
             case ActionType::Invalid:
             default:
-                return {kDutyOffNs, kDutyOffNs};
+                return {duty_off, duty_off};
         }
     }
 
@@ -432,6 +575,13 @@ private:
                 return "INVALID";
         }
     }
+
+    bool sysfs_enabled_ = true;
+    bool sysfs_ready_ = false;
+    int period_ns_ = 20000000;
+    std::string last_error_;
+    std::string left_duty_path_ = std::string(kPwm1Dir) + "/duty_cycle";
+    std::string right_duty_path_ = std::string(kPwm2Dir) + "/duty_cycle";
 };
 
 std::uint64_t nowMs() {

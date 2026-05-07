@@ -7,16 +7,17 @@ PROCESSOR_PORT="${PROCESSOR_PORT:-19521}"
 GATEWAY_HOST="${GATEWAY_HOST:-127.0.0.1}"
 PROCESSOR_TIMEOUT_MS="${PROCESSOR_TIMEOUT_MS:-8000}"
 MOCK_D435I="${MOCK_D435I:-0}"
+USV_THRUSTER_SYSFS="${USV_THRUSTER_SYSFS:-1}"
 CXX="${CXX:-g++}"
 CXXFLAGS="${CXXFLAGS:--std=c++17 -O2 -Wall -Wextra -pedantic}"
 LDFLAGS_REALSENSE="${LDFLAGS_REALSENSE:--lrealsense2}"
 
 cd "${FW_DIR}"
 echo "[1/3] compiling main_processor_demo"
-${CXX} ${CXXFLAGS} MainProcessor.cc SlamExecutionLayer.cc ${LDFLAGS_REALSENSE} -o main_processor_demo
+#${CXX} ${CXXFLAGS} MainProcessor.cc SlamExecutionLayer.cc ${LDFLAGS_REALSENSE} -o main_processor_demo
 
 echo "[2/3] compiling communication_layer_demo"
-${CXX} ${CXXFLAGS} CommunicationLayer.cc -o communication_layer_demo
+#${CXX} ${CXXFLAGS} CommunicationLayer.cc -o communication_layer_demo
 
 cleanup() {
   if [[ -n "${PROCESSOR_PID:-}" ]] && kill -0 "${PROCESSOR_PID}" 2>/dev/null; then
@@ -34,8 +35,14 @@ else
   echo "[INFO] D435i mode: REAL (set MOCK_D435I=1 for lab mock data)"
 fi
 
+if [[ "${USV_THRUSTER_SYSFS}" == "0" || "${USV_THRUSTER_SYSFS}" == "false" || "${USV_THRUSTER_SYSFS}" == "off" ]]; then
+  echo "[INFO] Thruster mode: LOG ONLY (set USV_THRUSTER_SYSFS=1 for sysfs output)"
+else
+  echo "[INFO] Thruster mode: REAL SYSFS (set USV_THRUSTER_SYSFS=0 for log-only)"
+fi
+
 echo "[3/3] starting processor backend on :${PROCESSOR_PORT}"
-./main_processor_demo "${processor_args[@]}" &
+USV_THRUSTER_SYSFS="${USV_THRUSTER_SYSFS}" ./main_processor_demo "${processor_args[@]}" &
 PROCESSOR_PID=$!
 sleep 1
 

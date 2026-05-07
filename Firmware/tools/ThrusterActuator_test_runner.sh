@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Virtual core test helper for TrusterAcuator
+# Virtual core test helper for ThrusterActuator
 # - Single-file tool placed in tools/
 # - If TA binary not found, exits with clear compile instructions
 # - Interactive: 输入两个 0..100 的百分比 (left right)，或输入 q 退出
@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Candidate binary names to check (workspace-relative and PATH)
-CANDIDATES=("$ROOT_DIR/truster_actuator_demo" "$ROOT_DIR/TrusterAcuator" "$ROOT_DIR/truster_actuator" "$ROOT_DIR/truster")
+CANDIDATES=("$ROOT_DIR/thruster_actuator_demo" "$ROOT_DIR/ThrusterActuator" "$ROOT_DIR/thruster_actuator" "$ROOT_DIR/thruster")
 TA_BIN=""
 for c in "${CANDIDATES[@]}"; do
   if [ -x "$c" ]; then
@@ -18,19 +18,19 @@ for c in "${CANDIDATES[@]}"; do
   fi
 done
 if [ -z "$TA_BIN" ]; then
-  if command -v truster_actuator_demo >/dev/null 2>&1; then
-    TA_BIN="$(command -v truster_actuator_demo)"
-  elif command -v TrusterAcuator >/dev/null 2>&1; then
-    TA_BIN="$(command -v TrusterAcuator)"
+  if command -v thruster_actuator_demo >/dev/null 2>&1; then
+    TA_BIN="$(command -v thruster_actuator_demo)"
+  elif command -v ThrusterActuator >/dev/null 2>&1; then
+    TA_BIN="$(command -v ThrusterActuator)"
   fi
 fi
 
 if [ -z "$TA_BIN" ]; then
   cat <<EOF >&2
-ERROR: 没有在仓库或 PATH 中找到 TrusterAcuator 可执行文件。
-请在仓库根目录编译它，示例命令（在 /root/usv_better）:
+ERROR: 没有在仓库或 PATH 中找到 ThrusterActuator 可执行文件。
+请在 Firmware 目录编译它，示例命令（在 /root/usv_better/Firmware）:
 
-  g++ -std=c++17 -O2 -Wall TrusterAcuator.cc -o truster_actuator_demo
+  g++ -std=c++17 -O2 -Wall ThrusterActuator.cc -o thruster_actuator_demo
 
 或根据项目的构建系统调整编译命令。编译完成后将可执行文件放在仓库根目录或 PATH 中，脚本即会自动使用它。
 
@@ -39,7 +39,7 @@ EOF
   exit 2
 fi
 
-echo "Using TrusterAcuator binary: $TA_BIN"
+echo "Using ThrusterActuator binary: $TA_BIN"
 echo "交互式模式：输入单字母 ACK：F(前进) L(左) R(右) S(停止)，回车发送；输入 q 退出。"
 echo "Binary 输出规则：S -> 0ns，F/L/R -> ON (period-1) 。"
 echo "Safety: S = hard stop (duty 0)."
@@ -95,7 +95,7 @@ while true; do
       ;;
   esac
   if [ $rc -ne 0 ]; then
-    echo "TrusterAcuator 返回非零状态: $rc" >&2
+    echo "ThrusterActuator 返回非零状态: $rc" >&2
   fi
 done
 

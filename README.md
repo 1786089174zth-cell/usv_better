@@ -18,11 +18,11 @@ usv_better/
 		SlamExecutionLayer.cc
 		SlamExecutionLayer.h
 		SelD435iSmokeTest.cc
-		TrusterActuator.cc
+		ThrusterActuator.cc
 		tools/
 			run_tcp_stack.sh
 			thruster_test_runner.sh
-			TrusterActuator_test_runner.sh
+			ThrusterActuator_test_runner.sh
 			usv_tcp_full_flow_client.py
 ```
 
@@ -33,15 +33,15 @@ The sibling workspace folder `usv_test/` is currently empty and not used by this
 - `MainProcessor.cc`: processor parser/dispatcher demo, D435i capture orchestration, health output, `--d435i-selftest` entrypoint, and TCP backend mode.
 - `SlamExecutionLayer.h/.cc`: hub-to-SLAM execution bridge, RealSense D435i capture bridge, mock D435i bridge, RGB/depth/gyro row feature enrichment.
 - `SelD435iSmokeTest.cc`: 10-second D435i smoke test with `--mock`/`+mock` support.
-- `TrusterActuator.cc`: actuator mapping/output demo and sysfs PWM writer. The file name is historical.
+- `ThrusterActuator.cc`: actuator mapping/output demo and sysfs PWM writer.
 - `tools/thruster_test_runner.sh`: PWM validation entrypoint for dry-run and hardware sysfs writeout.
-- `tools/TrusterActuator_test_runner.sh`: legacy interactive helper that invokes `TrusterActuator` if present. The file name is historical.
+- `tools/ThrusterActuator_test_runner.sh`: legacy interactive helper that invokes `ThrusterActuator` if present.
 - `tools/run_tcp_stack.sh`: helper to run gateway + processor together in TCP mode.
 - `tools/usv_tcp_full_flow_client.py`: TCP client for full-flow tests (interactive on Windows).
 
 ## Dependencies
 - RealSense: targets that include `SlamExecutionLayer.cc` or `SlamExecutionLayer.h` link against Intel RealSense (`librealsense2`) and include `<librealsense2/rs.hpp>`.
-- No RealSense needed: targets that only build `CommunicationLayer.cc` or `TrusterActuator.cc`.
+- No RealSense needed: targets that only build `CommunicationLayer.cc` or `ThrusterActuator.cc`.
 
 If your RealSense installation is not in the default search path, add the appropriate `-I`, `-L`, and runtime library path flags.
 
@@ -52,7 +52,7 @@ Run these commands from `Firmware/`:
 g++ -std=c++17 -Wall -Wextra -pedantic CommunicationLayer.cc -o communication_layer_demo
 g++ -std=c++17 -Wall -Wextra -pedantic MainProcessor.cc SlamExecutionLayer.cc -lrealsense2 -o main_processor_demo
 g++ -std=c++17 -Wall -Wextra -pedantic SelD435iSmokeTest.cc SlamExecutionLayer.cc -lrealsense2 -o sel_d435i_smoke
-g++ -std=c++17 -Wall -Wextra -pedantic TrusterActuator.cc -o truster_actuator_demo
+g++ -std=c++17 -Wall -Wextra -pedantic ThrusterActuator.cc -o thruster_actuator_demo
 ```
 
 ## Runtime Entry Points
@@ -86,10 +86,22 @@ TCP backend mode:
 ./main_processor_demo --tcp --port 19521
 ```
 
+By default, realtime commands (F/L/R/S) write PWM duty cycles to sysfs for thruster control. To disable hardware output and log-only mode:
+
+```bash
+USV_THRUSTER_SYSFS=0 ./main_processor_demo --tcp --port 19521
+```
+
 Mock D435i (no hardware required):
 
 ```bash
-./main_processor_demo --tcp --mock-d435i
+./main_processor_demo --tcp --port 19521 --mock-d435i
+```
+
+Combine both:
+
+```bash
+USV_THRUSTER_SYSFS=0 ./main_processor_demo --tcp --port 19521 --mock-d435i
 ```
 
 The `SLI` processing path attempts D435i capture through the SLAM execution bridge. On a host without a D435i device and RealSense runtime, `SLI` commands can return capture errors unless mock mode is enabled.
@@ -117,7 +129,27 @@ Run processor in TCP mode and start the gateway in one script:
 bash tools/run_tcp_stack.sh
 ```
 
-This script prints a ready banner and forwards the gateway to the processor. Follow the on-screen instructions to run the client.
+Default behavior: real thruster sysfs output + real D435i. Script prints mode banners at startup.
+
+For lab testing with mock D435i and real sysfs output:
+
+```bash
+MOCK_D435I=1 bash tools/run_tcp_stack.sh
+```
+
+For log-only mode (no hardware output, real D435i):
+
+```bash
+USV_THRUSTER_SYSFS=0 bash tools/run_tcp_stack.sh
+```
+
+For lab simulation (log-only + mock D435i):
+
+```bash
+USV_THRUSTER_SYSFS=0 MOCK_D435I=1 bash tools/run_tcp_stack.sh
+```
+
+The script prints a ready banner and forwards the gateway to the processor. Follow the on-screen instructions to run the client.
 
 ## TCP Client
 The Python client sends a start config, realtime commands, and SLAM input:
@@ -137,6 +169,18 @@ The current thruster validation flow is consolidated into one script:
 
 ```bash
 bash tools/thruster_test_runner.sh
+sudo bash tools/thruster_test_runner.sh --hw
+```
+
+Dry-run mode (no hardware write):
+
+```bash
+bash tools/thruster_test_runner.sh
+```
+
+Hardware mode (writes to sysfs; requires sudo):
+
+```bash
 sudo bash tools/thruster_test_runner.sh --hw
 ```
 
@@ -173,7 +217,7 @@ Runtime mapping used by the script and current actuator demo:
 - `0%` maps to duty `0 ns` (hard stop)
 - Any positive value maps to duty `20000000 ns` in the current binary validation flow
 
-`TrusterActuator.cc` still contains shaping configuration fields such as `duty_span_ns` for future hardware behavior, but current output behavior is binary: non-positive input maps to `0 ns`; positive input maps to the full PWM period.
+`ThrusterActuator.cc` still contains shaping configuration fields such as `duty_span_ns` for future hardware behavior, but current output behavior is binary: non-positive input maps to `0 ns`; positive input maps to the full PWM period.
 
 ## Communication Frames
 All communication frames are newline-delimited text sent over TCP to `127.0.0.1:<bound_port>` or the host IP that runs the gateway. The default bound port is usually `19520` unless fallback binding was needed.
