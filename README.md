@@ -1,65 +1,100 @@
 # USV Edge Demo
 
 ## Overview
-This workspace contains a lightweight three-layer demo for USV edge validation.
-Current focus is the gateway/processor/SLAM-executor contract:
-- Communication layer exposes a TCP listener and parses/forwards normalized frames.
-- Communication layer forwards supported realtime/config/SLI frames and gateway management commands.
-- Main processor owns control, SLAM ingest gating, D435i capture orchestration, fusion semantics, health, and rollback signals.
-- SLAM executor bridge uses Intel RealSense D435i capture by default and also includes an explicit mock D435i mode for local smoke testing.
+This workspace is a lightweight three-layer demo for USV edge validation. It focuses on the gateway/processor/SLAM-executor contract and provides runnable TCP flows, SLAM ingest simulation, and thruster PWM validation.
 
-## Files
+Core layers:
+- Communication layer (gateway): TCP listener, line protocol parsing, forwarding, and gateway management commands.
+- Main processor: control, SLAM ingest gating, D435i capture orchestration, fusion semantics, health, and rollback signals.
+- SLAM executor bridge: Intel RealSense D435i capture by default with an explicit mock D435i mode for local smoke testing.
+
+## Repository Layout
+
+```
+usv_better/
+	Firmware/
+		CommunicationLayer.cc
+		MainProcessor.cc
+		SlamExecutionLayer.cc
+		SlamExecutionLayer.h
+		SelD435iSmokeTest.cc
+		TrusterActuator.cc
+		tools/
+			run_tcp_stack.sh
+			thruster_test_runner.sh
+			TrusterActuator_test_runner.sh
+			usv_tcp_full_flow_client.py
+```
+
+The sibling workspace folder `usv_test/` is currently empty and not used by this demo.
+
+## Key Files
 - `CommunicationLayer.cc`: TCP gateway adapter demo with line-oriented protocol handling and gateway management commands.
-- `MainProcessor.cc`: processing layer parser/dispatcher demo, D435i capture orchestration, health output, and `--d435i-selftest` entrypoint.
+- `MainProcessor.cc`: processor parser/dispatcher demo, D435i capture orchestration, health output, `--d435i-selftest` entrypoint, and TCP backend mode.
 - `SlamExecutionLayer.h/.cc`: hub-to-SLAM execution bridge, RealSense D435i capture bridge, mock D435i bridge, RGB/depth/gyro row feature enrichment.
 - `SelD435iSmokeTest.cc`: 10-second D435i smoke test with `--mock`/`+mock` support.
-- `TrusterAcuator.cc`: existing actuator mapping/output demo and dry-run sysfs PWM writer. The file name is historical.
-- `tools/thruster_test_runner.sh`: single-file PWM validation entrypoint for dry-run and hardware sysfs writeout.
-- `tools/TrusterAcuator_test_runner.sh`: legacy/auxiliary interactive helper that invokes a compiled `TrusterAcuator` binary if present. The file name is historical.
+- `TrusterActuator.cc`: actuator mapping/output demo and sysfs PWM writer. The file name is historical.
+- `tools/thruster_test_runner.sh`: PWM validation entrypoint for dry-run and hardware sysfs writeout.
+- `tools/TrusterActuator_test_runner.sh`: legacy interactive helper that invokes `TrusterActuator` if present. The file name is historical.
+- `tools/run_tcp_stack.sh`: helper to run gateway + processor together in TCP mode.
+- `tools/usv_tcp_full_flow_client.py`: TCP client for full-flow tests (interactive on Windows).
 
 ## Dependencies
+- RealSense: targets that include `SlamExecutionLayer.cc` or `SlamExecutionLayer.h` link against Intel RealSense (`librealsense2`) and include `<librealsense2/rs.hpp>`.
+- No RealSense needed: targets that only build `CommunicationLayer.cc` or `TrusterActuator.cc`.
 
-The SLAM execution path includes `<librealsense2/rs.hpp>` and links against Intel RealSense (`librealsense2`). Install the RealSense headers/library before building targets that include `SlamExecutionLayer.cc` or `SlamExecutionLayer.h`.
-
-Targets that only build `CommunicationLayer.cc` or `TrusterAcuator.cc` do not require RealSense.
+If your RealSense installation is not in the default search path, add the appropriate `-I`, `-L`, and runtime library path flags.
 
 ## Build
-
 Run these commands from `Firmware/`:
 
 ```bash
 g++ -std=c++17 -Wall -Wextra -pedantic CommunicationLayer.cc -o communication_layer_demo
 g++ -std=c++17 -Wall -Wextra -pedantic MainProcessor.cc SlamExecutionLayer.cc -lrealsense2 -o main_processor_demo
 g++ -std=c++17 -Wall -Wextra -pedantic SelD435iSmokeTest.cc SlamExecutionLayer.cc -lrealsense2 -o sel_d435i_smoke
-g++ -std=c++17 -Wall -Wextra -pedantic TrusterAcuator.cc -o truster_actuator_demo
+g++ -std=c++17 -Wall -Wextra -pedantic TrusterActuator.cc -o truster_actuator_demo
 ```
-
-If your RealSense installation is not in a default compiler search path, add the appropriate `-I`, `-L`, and runtime library path flags for your host.
 
 ## Runtime Entry Points
 
 ### Communication gateway
-
-Run the communication layer with:
-
 ```bash
 ./communication_layer_demo
 ```
 
-It listens on `0.0.0.0`. The default port is `19520`; if unavailable, it tries fallback ports in this order: `9773`, `11514`, `23758`, `52019`.
+Listens on `0.0.0.0`. Default port is `19520`; fallback order is `9773`, `11514`, `23758`, `52019`.
+
+Environment variables:
+- `USV_PROCESSOR_HOST` (default `127.0.0.1`)
+- `USV_PROCESSOR_PORT` (default `19521`)
+
+CLI overrides:
+```bash
+./communication_layer_demo --processor-host 127.0.0.1 --processor-port 19521 --processor-timeout-ms 1000
+```
 
 ### Main processor
-
-Run the processor in stdin/stdout mode with:
+Stdin/stdout mode:
 
 ```bash
 ./main_processor_demo
 ```
 
-The `SLI` processing path attempts D435i capture through the SLAM execution bridge. On a host without a D435i device and RealSense runtime, `SLI` commands can return capture errors.
+TCP backend mode:
+
+```bash
+./main_processor_demo --tcp --port 19521
+```
+
+Mock D435i (no hardware required):
+
+```bash
+./main_processor_demo --tcp --mock-d435i
+```
+
+The `SLI` processing path attempts D435i capture through the SLAM execution bridge. On a host without a D435i device and RealSense runtime, `SLI` commands can return capture errors unless mock mode is enabled.
 
 ### D435i self-test and smoke test
-
 Processor self-test:
 
 ```bash
@@ -75,8 +110,29 @@ Dedicated 10-second smoke test:
 
 `--mock`/`+mock` enables the mock D435i bridge for local validation without a camera.
 
-## Thruster PWM Validation
+## TCP Stack Helper
+Run processor in TCP mode and start the gateway in one script:
 
+```bash
+bash tools/run_tcp_stack.sh
+```
+
+This script prints a ready banner and forwards the gateway to the processor. Follow the on-screen instructions to run the client.
+
+## TCP Client
+The Python client sends a start config, realtime commands, and SLAM input:
+
+```bash
+python3 tools/usv_tcp_full_flow_client.py --host 127.0.0.1 --port 19520 --actions F,L,R,S --print-full-detail
+```
+
+Windows interactive mode uses WASD (requires `msvcrt`):
+
+```bash
+python tools/usv_tcp_full_flow_client.py --host <device-ip> --interactive --print-full-detail
+```
+
+## Thruster PWM Validation
 The current thruster validation flow is consolidated into one script:
 
 ```bash
@@ -84,11 +140,9 @@ bash tools/thruster_test_runner.sh
 sudo bash tools/thruster_test_runner.sh --hw
 ```
 
-The script writes PWM duty cycles directly to sysfs and no longer compiles or invokes a temporary C++ runner. No log file is generated by default.
-It only accepts positive thrust percentages in the range `0..100` for both channels.
+The script writes PWM duty cycles directly to sysfs and no longer compiles or invokes a temporary C++ runner. No log file is generated by default. It only accepts positive thrust percentages in the range `0..100` for both channels.
 
 ### 常见“几步后不响应”故障排查（PWM sysfs）
-
 如果你把 `duty_cycle` 文件句柄长期保持打开（例如在循环外 `std::ofstream duty(...);`，循环内持续 `<<`），在部分内核/驱动上会出现“前几次有效，随后看起来不再响应”的现象。
 
 建议：
@@ -102,7 +156,6 @@ It only accepts positive thrust percentages in the range `0..100` for both chann
 - `enable`、`period`、`duty_cycle` 的写入顺序和返回状态都要检查。
 
 ### PWM topology
-
 Orange Pi Zero 3 pin topology used by this workspace:
 - Processor PWM sysfs path for channel 1: `/sys/class/pwm/pwmchip0/pwm1`
 - Processor PWM sysfs path for channel 2: `/sys/class/pwm/pwmchip0/pwm2`
@@ -113,7 +166,6 @@ Orange Pi Zero 3 pin topology used by this workspace:
 - 40-pin header mapping: `PH3 -> pin8`, `PH2 -> pin10`
 
 Runtime mapping used by the script and current actuator demo:
-
 - Neutral duty: `0 ns`
 - Period: `20000000 ns` (`50 Hz`)
 - Input format: left/right percentage values in the range `0` to `100`
@@ -121,14 +173,12 @@ Runtime mapping used by the script and current actuator demo:
 - `0%` maps to duty `0 ns` (hard stop)
 - Any positive value maps to duty `20000000 ns` in the current binary validation flow
 
-`TrusterAcuator.cc` still contains shaping configuration fields such as `duty_span_ns` for future hardware behavior, but current output behavior is binary: non-positive input maps to `0 ns`; positive input maps to the full PWM period.
+`TrusterActuator.cc` still contains shaping configuration fields such as `duty_span_ns` for future hardware behavior, but current output behavior is binary: non-positive input maps to `0 ns`; positive input maps to the full PWM period.
 
 ## Communication Frames
-
 All communication frames are newline-delimited text sent over TCP to `127.0.0.1:<bound_port>` or the host IP that runs the gateway. The default bound port is usually `19520` unless fallback binding was needed.
 
 ### 1) Realtime short frame
-
 Gateway input:
 
 ```text
@@ -149,7 +199,6 @@ R <seq> <tx_ms> <F|L|R|S>
 - `C STOP` remains a session stop command and is separate from realtime `S`.
 
 ### 2) SLAM image ingest frame
-
 ```text
 SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12> keyframe=<0|1> quality_hint=<0..100> payload_ref=<id>
 SL <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12> keyframe=<0|1> quality_hint=<0..100> payload_ref=<id>
@@ -160,7 +209,6 @@ SL <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=<GRAY8|RGB24|NV12> 
 - Legacy alias `SL` is accepted by the gateway while `legacy_alias=on` and normalized to `SLI`.
 
 ### 3) Row-feature SLI frame (processor-supported)
-
 The processor also accepts already-enriched row-feature `SLI` frames:
 
 ```text
@@ -170,7 +218,6 @@ SLI <seq> <tx_ms> frame_id=<n> width=<w> height=<h> pixel_fmt=ROW1 keyframe=<0|1
 Required row metadata fields are `feature=row`, `row_index`, `channel_mode`, `stride`, `sample_count`, `payload_len`, and `payload_crc32`.
 
 ### 4) Config long frame
-
 ```text
 C START seq=<n> ts=<ms> soft_hz=<1..100> max_power=<v> left_gain=<v> right_gain=<v> left_trim=<v> right_trim=<v> slam_max_fps=<1..30> slam_timeout_ms=<1..200> slam_max_groups=<1..64> slam_min_quality=<0..100> slam_drop_policy=<reject|oldest|newest> row_ratio=<0..1> channel_mode=<R|G|B|GRAY> sample_stride=<1..64> max_rows=<1..8> pack_mode=<bin|hex>
 C STOP seq=<n> ts=<ms>
@@ -179,11 +226,9 @@ C STOP seq=<n> ts=<ms>
 - Legacy aliases `CS` and `CE` are accepted by the gateway while `legacy_alias=on` and normalized to `C START` and `C STOP`.
 
 ### Unsupported / deferred frame
-
-`SR <seq> ...` row extraction requests are **not currently implemented in `CommunicationLayer.cc`**. Send processor-supported row-feature data as `SLI feature=row ...` instead, or use normal `SLI` to trigger the current D435i-backed path.
+`SR <seq> ...` row extraction requests are not implemented in the gateway. Send processor-supported row-feature data as `SLI feature=row ...` instead, or use normal `SLI` to trigger the current D435i-backed path.
 
 ## ACK Format
-
 Processor ACK format:
 
 ```text
@@ -204,7 +249,6 @@ ACK <OK|ERR> seq=<n> up_ms=<n> down_ms=<n> tag=<code> detail=<code_or_payload> g
 - `gw_route` describes gateway routing outcome such as `forwarded`, `parse_reject`, `route_timeout`, or `mgmt`.
 
 ## Runtime Management
-
 Gateway management commands:
 
 ```text
@@ -226,7 +270,6 @@ Notes:
 - `HEALTH` exposes processor state, ACK counters/latency percentiles, SLI drops, executor timeouts, and rollback recommendation.
 
 ## Release Gates
-
 Block release if any condition is true:
 - Protocol consistency checks fail for `C START/C STOP/R/RT/SL/SLI`.
 - `rollback_recommended=1` in either gateway or processor health output for a sustained window.
@@ -235,14 +278,12 @@ Block release if any condition is true:
 - D435i smoke test fails in a hardware-required deployment environment.
 
 ## Canary and Rollback Flow
-
 1. Stage A (lab): keep `legacy_alias=on`, verify full regression.
 2. Stage B (single vessel): disable alias gradually with `GW SWITCH legacy_alias=off`.
 3. Stage C (fleet): keep alias off, monitor health, and roll forward only when stable.
 4. Rollback trigger: when timeout/error SLO is violated, execute `GW ROLLBACK` and re-enable compatible path.
 
 ## Quick Test
-
 Processor stdin/stdout flow. This command uses `SLI`, so it requires a working D435i path; on a non-camera host, expect a capture error for the `SLI` command.
 
 ```bash
@@ -286,7 +327,6 @@ printf 'C START seq=1 ts=100 soft_hz=20 max_power=60 left_gain=1 right_gain=1 le
 ```
 
 ## Processor-Executor Reserved Interface
-
 Core session/execution interface:
 - `PushConfig(session_id, config_version, slam_cfg)`
 - `ProcessFrame(session_id, frame_meta, timeout_ms)`
@@ -301,7 +341,6 @@ D435i capture interface:
 - `IsD435iReady()`
 
 ## Notes
-
 - Communication layer no longer decides SLAM business semantics.
 - Processing layer controls realtime rate limiting, SLAM ingest gating, drop policy, timeout classification, D435i capture orchestration, and fusion output.
 - The current executor bridge performs D435i-backed row feature enrichment and simulated SLAM result generation; mock D435i is available only when explicitly enabled.
